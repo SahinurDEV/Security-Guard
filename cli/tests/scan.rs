@@ -202,7 +202,8 @@ fn corpus(root: &Path) -> PathBuf {
         "on: tag\n",
     );
     write(&d.join(".github/workflows/notes.txt"), "not a workflow\n");
-    // pruned directories, and a file merely named like one
+    // dependencies are scanned; pruned directories, and a file merely named
+    // like one
     write(&d.join("node_modules/evil/index.js"), PAYLOAD);
     write(&d.join("deep/target/x.js"), PAYLOAD);
     write(&d.join("deep/dist"), format!("{EVAL}\n"));
@@ -529,6 +530,55 @@ fn hidden_padded_code_near_misses() {
     }
     let out = g(&tmp, &["scan", &s(&repo)]).run();
     assert_eq!(out.code, 0, "{}", out.shown_all());
+}
+
+/// Dependency code is never trusted: everything under node_modules is
+/// scanned, its dist/ and build/ folders and nested node_modules too, whether
+/// the scan starts at the project or at node_modules itself, and `guard clean`
+/// cleans it. A package's own workflow files never run, so their names are
+/// not reported.
+#[test]
+fn dependencies_are_scanned() {
+    let tmp = Tmp::new("deps");
+    let app = tmp.join("app");
+    let nm = app.join("node_modules");
+    write(&nm.join("left-pad/index.js"), "module.exports = 1;\n");
+    write(&nm.join("left-pad/.github/workflows/ci.yml"), "on: push\n");
+    write(&nm.join("evil/dist/index.js"), PAYLOAD);
+    write(&nm.join("a/node_modules/b/build/x.js"), PAYLOAD);
+    write(&app.join("dist/out.js"), PAYLOAD); // the project's own build output stays pruned
+    let want = ["a/node_modules/b/build/x.js", "evil/dist/index.js"];
+    for (root, prefix) in [(&app, "node_modules/"), (&nm, "")] {
+        let out = g(&tmp, &["scan", &s(root), "--json"]).run();
+        assert_eq!(out.code, 1, "{}", out.shown_all());
+        let t = &parse_json(&out.stdout)["tree"];
+        let mut hit: Vec<String> = t["fingerprint"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["where"].as_str().unwrap().to_string())
+            .collect();
+        hit.dedup();
+        let want: Vec<String> = want.iter().map(|w| format!("{prefix}{w}")).collect();
+        assert_eq!(hit, want, "{}", out.shown_all());
+    }
+    let out = g(&tmp, &["clean", &s(&app)]).run();
+    assert_eq!(out.code, 0, "{}", out.shown_all());
+    for f in ["evil/dist/index.js", "a/node_modules/b/build/x.js"] {
+        let p = nm.join(f);
+        assert!(
+            !p.exists() || !std::fs::read_to_string(&p).unwrap().contains(EVAL),
+            "{f}: {}",
+            out.shown_all()
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(nm.join("left-pad/index.js")).unwrap(),
+        "module.exports = 1;\n"
+    );
+    assert!(std::fs::read_to_string(app.join("dist/out.js"))
+        .unwrap()
+        .contains(EVAL));
 }
 
 #[test]

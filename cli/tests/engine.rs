@@ -1288,7 +1288,7 @@ fn scan_av_bucket() {
         &d.join("bundle.zip"),
         make_zip(&[("x/e.com", &eicar())], &[]),
     );
-    write(&d.join("node_modules/skip/e.com"), eicar());
+    write(&d.join("dist/skip/e.com"), eicar());
     let (out, tree) = guard_scan(&tmp, &d, &[]);
     assert_eq!(out.code, 1);
     let av: Vec<&Value> = tree["av"].as_array().unwrap().iter().collect();
@@ -1335,7 +1335,7 @@ fn fingerprint_scoping() {
         format!("(async () => {{\n const p = {ATOB};\n {EVAL};\n}})();\n"),
     );
     write(&d.join("blob.txt"), concat!("var _$_1", "e42=['x']\n"));
-    write(&d.join("node_modules/x/eval.js"), format!("{EVAL}\n"));
+    write(&d.join("dist/x/eval.js"), format!("{EVAL}\n"));
     let (out, tree) = guard_scan(&tmp, &d, &[]);
     assert!(ids_for(&tree, ".env").contains(&"env.auth.b64".to_string()));
     assert!(!ids_for(&tree, "notes.md").contains(&"env.auth.b64".to_string()));

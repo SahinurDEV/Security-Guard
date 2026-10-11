@@ -111,6 +111,7 @@ fn watched(root: &Path) {
     fs::create_dir_all(clean.join(".git")).unwrap();
     write(&clean.join("index.js"), "module.exports = 1;\n");
     write(&root.join("Projects/loose/x.js"), "console.log(1)\n");
+    // dependencies are scanned as a whole (never walked file by file);
     // excluded and too-deep paths are never seen
     write(&root.join("Projects/node_modules/evil/index.js"), PAYLOAD);
     write(&root.join("Desktop/a/b/c/d/e/f/g/deep.js"), PAYLOAD);
@@ -825,8 +826,18 @@ fn service_scans_existing_files_on_first_start() {
         let p = serde_json::to_string(&p.to_string_lossy()).unwrap();
         assert!(found.contains(&p), "no alert for {p}:\n{found}\n{text}");
     }
-    // nothing outside the watch scope: excluded and too-deep paths
-    assert!(!found.contains("node_modules"), "{found}");
+    // dependencies are scanned and cleaned too
+    let nm = serde_json::to_string(
+        &w.work
+            .join("Projects")
+            .join("node_modules")
+            .to_string_lossy(),
+    )
+    .unwrap();
+    assert!(found.contains(&nm), "no alert for {nm}:\n{found}\n{text}");
+    let dep = read(&w.work.join("Projects/node_modules/evil/index.js"));
+    assert!(!dep.contains(EVAL), "{dep}");
+    // nothing outside the watch scope: too-deep paths
     assert!(!found.contains("deep.js"), "{found}");
     // cleaned: the whole-file threats are gone, the clone's code was excised
     assert!(!dl.join("eicar.com").exists(), "{text}");

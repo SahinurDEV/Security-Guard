@@ -156,6 +156,28 @@ fn version_of(meta: &Value) -> String {
     }
 }
 
+/// The registry package a package.json entry fetches, as (name, spec). An
+/// alias (`"x": "npm:real@1.2"`) installs `real`, not `x`. None for a spec
+/// that fetches no registry package (a git repo, URL, local path or
+/// workspace): the registry package of that name is never installed.
+fn npm_alias(name: &str, spec: &str) -> Option<(String, String)> {
+    static NON_REGISTRY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^(?:git[+:]|github:|gitlab:|bitbucket:|gist:|https?:|file:|link:|workspace:|portal:|patch:|[./~]|[^@/\s:]+/[^/\s]+$)",
+        )
+        .unwrap()
+    });
+    let spec = spec.trim();
+    let Some(target) = spec.strip_prefix("npm:") else {
+        return (!NON_REGISTRY.is_match(spec)).then(|| (name.to_string(), spec.to_string()));
+    };
+    // the version follows the last @ that isn't a scope's leading @
+    Some(match target[1.min(target.len())..].rfind('@') {
+        Some(i) => (target[..i + 1].to_string(), target[i + 2..].to_string()),
+        None => (target.to_string(), String::new()),
+    })
+}
+
 fn names(base: &str, content: &str) -> Vec<(String, String)> {
     let mut out = vec![];
     if base == "package.json" {
@@ -169,7 +191,7 @@ fn names(base: &str, content: &str) -> Vec<(String, String)> {
             "peerDependencies",
         ] {
             for (n, v) in items(data.get(key)) {
-                out.push((n.clone(), pystr::py_str(v)));
+                out.extend(npm_alias(n, &pystr::py_str(v)));
             }
         }
     } else if base == "package-lock.json" || base == "npm-shrinkwrap.json" {
@@ -178,7 +200,11 @@ fn names(base: &str, content: &str) -> Vec<(String, String)> {
         };
         for (pkgpath, meta) in items(data.get("packages")) {
             if !pkgpath.is_empty() {
-                let name = pkgpath.rsplit("node_modules/").next().unwrap_or(pkgpath);
+                // an alias records the package it really installed as "name"
+                let name = match meta.get("name") {
+                    Some(Value::String(n)) if !n.is_empty() => n.as_str(),
+                    _ => pkgpath.rsplit("node_modules/").next().unwrap_or(pkgpath),
+                };
                 out.push((name.to_string(), version_of(meta)));
             }
         }
@@ -319,6 +345,47 @@ mod tests {
             "> 99999999999999999999999"
         ));
         assert!(in_range("١.٢.٣", "== 1.2.3"));
+    }
+
+    #[test]
+    fn aliases_check_the_real_package() {
+        let a = |n, s| npm_alias(n, s).unwrap();
+        assert_eq!(a("x", "^1.2"), ("x".into(), "^1.2".into()));
+        assert_eq!(a("x", "latest"), ("x".into(), "latest".into()));
+        assert_eq!(a("x", ">=1.0.0 <2"), ("x".into(), ">=1.0.0 <2".into()));
+        assert_eq!(
+            a("s-0-13", "npm:scheduler@0.13.0"),
+            ("scheduler".into(), "0.13.0".into())
+        );
+        assert_eq!(a("y", "npm:@sc/pkg@~2"), ("@sc/pkg".into(), "~2".into()));
+        assert_eq!(a("y", "npm:@sc/pkg"), ("@sc/pkg".into(), String::new()));
+        assert_eq!(a("y", "npm:evil"), ("evil".into(), String::new()));
+        // fetched from somewhere other than the registry
+        for spec in [
+            "git+https://github.com/google/closure-net.git#6f48f57",
+            "github:mongodb-js/dbx-js-tools#main",
+            "mongodb-js/dbx-js-tools",
+            "https://example.com/x.tgz",
+            "file:../x",
+            "./x",
+            "workspace:*",
+            "link:../x",
+        ] {
+            assert_eq!(npm_alias("x", spec), None, "{spec}");
+        }
+        let bl = Blocklist {
+            bl: serde_json::from_str(r#"{"npm": {"evil": [">= 0"], "s-0-13": [">= 0"]}}"#).unwrap(),
+        };
+        let pj =
+            r#"{"dependencies": {"nice": "npm:evil@1.0.0", "s-0-13": "npm:scheduler@0.13.0"}}"#;
+        let hits = bl.check_manifest("package.json", pj);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0]["name"], "evil");
+        let lock = r#"{"packages": {"": {}, "node_modules/nice": {"name": "evil", "version": "1.0.0"},
+            "node_modules/s-0-13": {"name": "scheduler", "version": "0.13.0"}}}"#;
+        let hits = bl.check_manifest("package-lock.json", lock);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0]["name"], "evil");
     }
 
     #[test]

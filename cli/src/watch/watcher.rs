@@ -38,9 +38,20 @@ use crate::pyrepr;
 use crate::scan::remediate::Remediator;
 use crate::scan::scanner::{self, Scanner};
 use crate::scan::workflow::Baseline;
+use crate::scan::DEPS_DIR;
 
 /// Cleared by SIGTERM / SIGINT (Ctrl+C on Windows).
 pub static RUNNING: AtomicBool = AtomicBool::new(true);
+
+/// What package managers write when an install finishes.
+const LOCKFILES: &[&str] = &[
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lock",
+    "bun.lockb",
+];
 
 const BINARY_MASK_EXTS: &[&str] = &[
     ".woff2", ".woff", ".ttf", ".otf", ".png", ".jpg", ".jpeg", ".ico", ".gif", ".webp",
@@ -190,6 +201,9 @@ enum Kind {
     NewFile,
     /// a file of a type outside scan_new_files_ext: antivirus engine only
     OtherFile,
+    /// a node_modules directory, new or with entries added or removed (an
+    /// install): scanned whole, never walked into the snapshot
+    Deps,
 }
 
 struct Event {
@@ -269,7 +283,11 @@ impl Watcher {
         let log_path = home.join("watcher.log");
 
         let sig = crate::scan::sigs::load(None)?;
-        let scanner = Scanner::new(&sig, true)?;
+        let mut scanner = Scanner::new(&sig, true)?;
+        // repo scans leave node_modules out: an install there is a Deps
+        // event, scanned on its own, so editing a project file doesn't rescan
+        // every dependency
+        scanner.skip_deps = true;
         let num = |k: &str, d: f64| match get(k) {
             None => Ok(d),
             v => as_float(v).ok_or_else(|| bad(k)),
@@ -522,7 +540,19 @@ impl Watcher {
             if depth >= self.max_depth {
                 dirs.clear();
             }
+            // an excluded node_modules is still reported (its mtime moves on
+            // every install), only not walked
+            let deps: Vec<PathBuf> = dirs
+                .iter()
+                .filter(|(n, link)| n == DEPS_DIR && !link && self.exclude.contains(n))
+                .map(|(n, _)| d.join(n))
+                .collect();
             dirs.retain(|(n, _)| !self.exclude.contains(n));
+            for p in deps {
+                if let Ok(md) = fs::metadata(&p) {
+                    out(self, p.to_string_lossy().into_owned(), true, mtime(&md));
+                }
+            }
             for (n, _) in &dirs {
                 let p = d.join(n);
                 if let Ok(md) = fs::metadata(&p) {
@@ -562,6 +592,13 @@ impl Watcher {
                         parent
                     },
                     detail: "new .git directory".into(),
+                });
+            }
+            if base == DEPS_DIR {
+                return Some(Event {
+                    kind: Kind::Deps,
+                    path: path.into(),
+                    detail: "dependencies changed".into(),
                 });
             }
             return Some(Event {
@@ -744,8 +781,15 @@ impl Watcher {
             let Some(ev) = self.classify(path, is_dir.contains(path)) else {
                 continue;
             };
+            if !is_dir.contains(path) && LOCKFILES.contains(&pystr::name(path)) {
+                // written once an install is done: scan what it installed
+                let nm = Path::new(path).with_file_name(DEPS_DIR);
+                if nm.is_dir() {
+                    work.add_repo(nm.to_string_lossy().into_owned(), "lockfile changed");
+                }
+            }
             match ev.kind {
-                Kind::Clone | Kind::GitChange => work.add_repo(ev.path, &ev.detail),
+                Kind::Clone | Kind::GitChange | Kind::Deps => work.add_repo(ev.path, &ev.detail),
                 Kind::NewDir => {
                     if let Some(repo) = self.repo_root(&ev.path) {
                         work.add_repo(repo, "new dir in repo");
@@ -977,7 +1021,8 @@ impl Watcher {
             return None;
         }
         let rel = parts(p.strip_prefix(&root).ok()?);
-        let dirs = if is_dir {
+        // a node_modules directory itself is reported, as the walk does
+        let dirs = if is_dir && rel.last().map(String::as_str) != Some(DEPS_DIR) {
             &rel[..]
         } else {
             &rel[..rel.len() - 1]
@@ -1017,7 +1062,9 @@ impl Watcher {
             let s = p.to_string_lossy().into_owned();
             // only a directory new to the snapshot is walked: Windows also
             // reports a known directory as modified whenever an entry changes
-            let walk = dir && !self.store.contains(&s).map_err(|e| e.to_string())?;
+            let walk = dir
+                && pystr::name(&s) != DEPS_DIR
+                && !self.store.contains(&s).map_err(|e| e.to_string())?;
             let mut add = |me: &mut Self, path: String, d: bool, mt: f64| {
                 if err.is_some() {
                     return;

@@ -11,7 +11,7 @@ use std::process::Command;
 use serde_json::{json, Map, Value};
 
 use super::depbl::Blocklist;
-use super::fingerprint::Matcher;
+use super::fingerprint::{Matcher, DEPS_DIR};
 use super::magic::Checker;
 use super::py;
 use super::sigs::Res;
@@ -47,6 +47,9 @@ pub struct Scanner {
     skip_names: Vec<String>,
     deps: Option<Blocklist>,
     av: Option<Engine>,
+    /// Leave node_modules out of a tree walk (the watcher scans it on its own
+    /// when it changes), unless the tree is a node_modules directory itself.
+    pub skip_deps: bool,
 }
 
 pub fn read_text_capped(p: &Path) -> Option<String> {
@@ -123,6 +126,7 @@ impl Scanner {
             skip_names,
             deps: Blocklist::load(),
             av,
+            skip_deps: false,
         })
     }
 
@@ -172,7 +176,11 @@ impl Scanner {
             buckets[3].1 = wf;
         }
 
-        // os.walk order, pruning skipped directory names before descending
+        // os.walk order, pruning skipped directory names before descending.
+        // Dependency code is never trusted: inside node_modules nothing is
+        // pruned, and its files don't count toward MAX_FILES (a big project's
+        // dependencies alone pass it).
+        let root_is_deps = pystr::name(repo.trim_end_matches(['/', '\\'])) == DEPS_DIR;
         let mut seen = 0usize;
         let mut stack: Vec<String> = vec![String::new()];
         'walk: while let Some(rel_dir) = stack.pop() {
@@ -184,9 +192,17 @@ impl Scanner {
             let Some((dirs, files)) = listdir(Path::new(&dir)) else {
                 continue;
             };
+            let in_deps = root_is_deps || rel_dir.split('/').any(|c| c == DEPS_DIR);
             let dirs: Vec<String> = dirs
                 .into_iter()
-                .filter(|d| !self.skip_names.contains(d))
+                .filter(|d| {
+                    in_deps
+                        || if d == DEPS_DIR {
+                            !self.skip_deps
+                        } else {
+                            !self.skip_names.contains(d)
+                        }
+                })
                 .collect();
             for f in files {
                 let rel = if rel_dir.is_empty() {
@@ -195,7 +211,7 @@ impl Scanner {
                     format!("{rel_dir}/{f}")
                 };
                 let full = py::join(&repo, &rel);
-                seen += 1;
+                seen += usize::from(!in_deps);
                 if seen > MAX_FILES {
                     buckets[2].1.push(json!({
                         "where": repo, "sig_id": "scan.aborted", "severity": "info", "category": "scanner",
@@ -218,7 +234,15 @@ impl Scanner {
                 let Some(content) = read_text_capped(Path::new(&full)) else {
                     continue;
                 };
-                for f in self.matcher.scan_content(&rel, &content) {
+                let found = if in_deps {
+                    // GitHub runs only a repo's own workflows, never a package's
+                    let mut f = self.matcher.scan_text(&rel, &content);
+                    f.retain(|f| f.sig_id != "wf.name");
+                    f
+                } else {
+                    self.matcher.scan_content(&rel, &content)
+                };
+                for f in found {
                     buckets[2].1.push(f.to_json());
                 }
                 if let Some(bl) = &self.deps {

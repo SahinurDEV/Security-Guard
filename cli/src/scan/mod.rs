@@ -17,6 +17,7 @@ pub(crate) mod workflow;
 use serde_json::{json, Value};
 
 use crate::pyjson;
+pub use fingerprint::DEPS_DIR;
 use scanner::Scanner;
 pub use sigs::gunzip;
 

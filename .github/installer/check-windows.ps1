@@ -69,6 +69,28 @@ $downloader = "powershell -WindowStyle Hid" + "den -ExecutionPolicy By" + "pass 
 $pre = "guard-preinstalled-$(Get-Random)"
 [IO.File]::WriteAllText((Join-Path $downloads "$pre.js"), $payload)
 [IO.File]::WriteAllText((Join-Path $downloads "$pre.ps1"), $downloader)
+# and an installed npm package carrying the loader, in a project
+$projects = Join-Path $env:USERPROFILE 'Projects'
+function Drop-Dependency($app) {
+  $dep = Join-Path $app 'node_modules\bad-dep'
+  New-Item -ItemType Directory -Force $dep | Out-Null
+  [IO.File]::WriteAllText((Join-Path $app 'package.json'), '{"name": "app", "dependencies": {"bad-dep": "1.0.0"}}')
+  [IO.File]::WriteAllText((Join-Path $dep 'package.json'), '{"name": "bad-dep", "version": "1.0.0"}')
+  [IO.File]::WriteAllText((Join-Path $dep 'index.js'), $payload)
+}
+# an alert for the project's node_modules, and the loader cut out of the package
+function Check-Dependency($app, $what) {
+  $name = Split-Path $app -Leaf
+  Wait-For 120 "an alert for $app\node_modules ($what)" {
+    Select-String -Path "$SysHome\alerts.jsonl" -SimpleMatch "$name" -Quiet
+  }
+  $dep = Join-Path $app 'node_modules\bad-dep\index.js'
+  Wait-For 60 "the loader cut out of $dep" {
+    -not ([IO.File]::ReadAllText($dep).Contains('eval(proxy' + 'Info)'))
+  }
+  Write-Host "watcher alerted on and cleaned $app\node_modules ($what)"
+}
+Drop-Dependency (Join-Path $projects "$pre-app")
 
 Write-Host "::group::guard.ps1"
 if ((Invoke-OneLiner 'good') -ne 0) { Fail 'guard.ps1 failed' }
@@ -92,6 +114,7 @@ try {
     }
     Write-Host "first-start scan alerted on $f"
   }
+  Check-Dependency (Join-Path $projects "$pre-app") 'there before the install'
   Wait-For 300 'the initial scan to finish' { Select-String -Path $log -SimpleMatch 'initial scan complete' -Quiet }
 } catch { Get-Content $log -Tail 50; throw }
 Start-Sleep -Seconds 2
@@ -102,6 +125,12 @@ try {
 } catch { Get-Content $log -Tail 50; throw }
 Write-Host "watcher alerted on $name"
 Remove-Item (Join-Path $downloads $name) -ErrorAction SilentlyContinue
+# an npm install of a malicious package into a project
+$app = Join-Path $projects "guard-ci-app-$(Get-Random)"
+Drop-Dependency $app
+[IO.File]::WriteAllText((Join-Path $app 'package-lock.json'), '{"lockfileVersion": 3}')
+try { Check-Dependency $app 'installed while Guard runs' } catch { Get-Content $log -Tail 50; throw }
+Remove-Item -Recurse -Force $app -ErrorAction SilentlyContinue
 Write-Host "::endgroup::"
 
 Write-Host "::group::guard.ps1: reinstall over the running task"

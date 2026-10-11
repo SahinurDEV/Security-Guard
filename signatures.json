@@ -12,7 +12,7 @@
   },
 
   "scan_extensions": [".ts", ".js", ".mjs", ".cjs"],
-  "skip_path_prefixes": ["node_modules", "dist", "build", ".next", "coverage", ".git",
+  "skip_path_prefixes": ["dist", "build", ".next", "coverage", ".git",
     ".dart_tool", "Pods", ".gradle", ".symlinks", "vendor", ".venv", "venv",
     "__pycache__", "target", ".pub-cache", ".cache", "DerivedData", ".tox",
     "bower_components", "elm-stuff", ".idea", ".gradle", "Carthage"],

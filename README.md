@@ -92,6 +92,13 @@ Uninstall anytime: `sudo guard uninstall` (or `guard uninstall` on Windows).
   (Ed25519-verified, fail-closed, downgrade-protected). No manual step.
 - **Malicious-dependency check** — versions matched against a GitHub-advisory
   malware blocklist (120k+ names).
+- **Dependency code is scanned too** — a popular package is not a safe one (a
+  hijacked release can ship malware under a trusted name), so `guard scan`,
+  `guard clean` and the watcher read every file in `node_modules`, its `dist/`
+  and `build/` folders included, and clean what they find like any other file.
+  The watcher scans a project's `node_modules` on the first start and after
+  each install (when `node_modules` or a lockfile changes). This makes scans of
+  big projects slower: about 1.5 minutes per 1 GB of dependencies.
 - **Optional telemetry** — machines could report install + status to a dashboard.
   Removed after v2.1.0: Guard no longer sends any telemetry.
 - **Host IR triage** — reboot/persistence/recon/flood forensics, OS-native.

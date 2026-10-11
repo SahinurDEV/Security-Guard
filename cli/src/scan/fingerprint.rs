@@ -9,6 +9,9 @@ use super::py;
 use super::sigs::{list, opt_str, req_str, str_list, Res};
 use crate::av::pystr;
 
+/// Where package managers install dependencies; scanned in full, never pruned.
+pub const DEPS_DIR: &str = "node_modules";
+
 pub struct Finding {
     pub where_: String,
     pub sig_id: String,
@@ -194,10 +197,16 @@ impl Matcher {
     }
 
     pub fn scan_content(&self, path: &str, content: &str) -> Vec<Finding> {
-        let mut out = Vec::new();
         if self.skip(path) {
-            return out;
+            return Vec::new();
         }
+        self.scan_text(path, content)
+    }
+
+    /// scan_content without the skip check, for a caller that already knows
+    /// the file is in scope (the tree walk inside node_modules).
+    pub fn scan_text(&self, path: &str, content: &str) -> Vec<Finding> {
+        let mut out = Vec::new();
         let base = pystr::name(path);
         if self.dropper_names.iter().any(|n| n == base) {
             out.push(Finding::new(
@@ -317,7 +326,9 @@ impl Matcher {
 
 pub fn skip_path(prefixes: &[String], path: &str) -> bool {
     let norm = path.replace('\\', "/");
-    let parts: Vec<&str> = norm.split('/').collect();
+    // dependency code is never trusted: inside node_modules nothing is
+    // skipped, not even a package's dist/ or build/
+    let parts: Vec<&str> = norm.split('/').take_while(|c| *c != DEPS_DIR).collect();
     prefixes
         .iter()
         .any(|p| parts.contains(&p.trim_matches('/')))
@@ -391,7 +402,15 @@ mod tests {
     fn names_skips_and_diffs() {
         let m = Matcher::new(&super::super::sigs::load(None).unwrap()).unwrap();
         let eval = concat!("eval(proxy", "Info)");
-        assert!(m.scan_content("a/node_modules/x/eval.js", eval).is_empty());
+        assert!(m.scan_content("a/dist/x/eval.js", eval).is_empty());
+        // dependency code is scanned, dist/ inside it too
+        assert!(!m.scan_content("a/node_modules/x/eval.js", eval).is_empty());
+        assert!(!m
+            .scan_content("a/node_modules/x/dist/eval.js", eval)
+            .is_empty());
+        assert!(m
+            .scan_content("dist/node_modules/x/eval.js", eval)
+            .is_empty());
         assert_eq!(
             ids(&m.scan_content("public/fonts/fa-solid-400.woff2", "")),
             ["drop.file.name"]
