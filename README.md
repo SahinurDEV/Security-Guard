@@ -309,15 +309,19 @@ are caught too. If it finds malware it **blocks the push** (exit 1). That covers
 - branch deletions, which push no content and always pass;
 - the **whole tree of the pushed tip**, so pushing more work onto a branch that
   is already infected is blocked until a commit removes the malware.
-  `GUARD_PUSH_SCOPE=new` scans only what the push adds.
 
 On a block Guard also cleans the working tree (injected code excised,
 whole-file droppers moved to the quarantine, undo with `guard restore <path>`).
-Set `GUARD_PUSH_QUARANTINE=0` to block without touching files. The pushed
-content is copied out of git objects into a temp dir and scanned there. Nothing
-is checked out or executed. If git can't work out what is being pushed, the push
-is blocked (fail closed; `GUARD_PUSH_FAIL_OPEN=1` overrides for one push).
-`GUARD_PUSH=off git push` skips the scan for one command and prints that it did.
+There is no opt-out: anything that looks like malware is quarantined. The pushed
+content is streamed out of git objects into a temp dir and scanned there, with
+blob sizes checked before anything is read. Nothing is checked out or executed.
+If git can't work out what is being pushed, the push is blocked (fail closed).
+
+**Guard's own repository is exempt**, because it must contain its IOCs (signatures,
+docs, test fixtures). A repo is exempt only when one of its configured remotes
+is `github.com/Syed-Bipul-Rahman/Security-Guard`, or when you list its remote URL
+or path in `~/.guard/trusted-repos` (one per line). Both live outside the
+repository's content, so a cloned repo can never mark itself trusted.
 
 **Bypass:** `git push --no-verify` makes git skip *all* client-side pre-push
 hooks, and a machine without Guard has no hook. A client hook is a seat belt,

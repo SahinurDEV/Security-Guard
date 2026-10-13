@@ -9,14 +9,14 @@
 //! them into a scratch directory (never executed, never checked out), and runs
 //! the regular tree scan over it. The full tree of each pushed tip is
 //! scanned as well, so a push onto an already-infected branch is blocked until
-//! the malware is removed in a commit (GUARD_PUSH_SCOPE=new turns that off).
+//! the malware is removed in a commit.
 //!
 //! Exit 0 lets the push through; exit 1 blocks it. On a block the working tree
 //! is cleaned (injected code excised, whole-file droppers quarantined, all
-//! reversible with `guard restore`) unless GUARD_PUSH_QUARANTINE=0.
+//! reversible with `guard restore`).
 //!
 //! Fail closed: if git can't tell what is being pushed, the push is blocked
-//! (GUARD_PUSH_FAIL_OPEN=1 lets it through with a warning).
+//! too. Guard's own repository is exempt (see trust.rs).
 //!
 //! Client-side hooks are skipped by `git push --no-verify`; see README
 //! "Push protection" for the server-side layer that cannot be bypassed.
@@ -173,72 +173,84 @@ fn tree_blobs(repo: &Path, commit: &str, out: &mut BTreeSet<(String, String)>) -
     Ok(())
 }
 
-/// Write each blob under dir/<path>; a second distinct version of the same
-/// path goes under dir/.guard-rev-N/<path>.
-fn materialize(repo: &Path, blobs: &BTreeSet<(String, String)>, dir: &Path) -> Result<BTreeMap<PathBuf, String>, String> {
+fn cat_file(repo: &Path, mode: &str, shas: Vec<String>) -> Result<(std::process::Child, std::thread::JoinHandle<()>), String> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["cat-file", "--batch"])
+        .args(["cat-file", mode])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("cannot run git: {e}"))?;
-    let mut input = String::new();
-    for (sha, _) in blobs {
-        input.push_str(sha);
-        input.push('\n');
-    }
     let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    // fed from a thread: git answers while we are still asking
     let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(input.as_bytes());
+        for sha in shas {
+            if stdin.write_all(format!("{sha}\n").as_bytes()).is_err() {
+                break;
+            }
+        }
     });
-    let mut data = Vec::new();
-    child
-        .stdout
-        .take()
-        .ok_or("no stdout")?
-        .read_to_end(&mut data)
-        .map_err(|e| e.to_string())?;
+    Ok((child, writer))
+}
+
+/// Write each blob under dir/<path>; a second distinct version of the same
+/// path goes under dir/.guard-rev-N/<path>. Sizes are checked first
+/// (`--batch-check`), blobs over MAX_BLOB are never read, and the rest are
+/// streamed straight to disk, so memory stays flat whatever the repo holds.
+fn materialize(repo: &Path, blobs: &BTreeSet<(String, String)>, dir: &Path) -> Result<BTreeMap<PathBuf, String>, String> {
+    use std::io::{BufRead, BufReader};
+    // 1. sizes
+    let (mut child, writer) = cat_file(repo, "--batch-check", blobs.iter().map(|b| b.0.clone()).collect())?;
+    let out = BufReader::new(child.stdout.take().ok_or("no stdout")?);
+    let mut keep: Vec<(&String, &String, u64)> = vec![];
+    let mut lines = out.lines();
+    for (sha, path) in blobs {
+        let line = lines.next().ok_or("short cat-file output")?.map_err(|e| e.to_string())?;
+        let h: Vec<&str> = line.split(' ').collect();
+        if h.len() == 3 && h[0] == sha && h[1] == "blob" {
+            let size: u64 = h[2].parse().map_err(|_| "bad size")?;
+            if size as usize <= MAX_BLOB && safe_rel(path).is_some() {
+                keep.push((sha, path, size));
+            }
+        } else if h.first() != Some(&sha.as_str()) {
+            return Err(format!("unexpected cat-file header: {line}"));
+        }
+    }
     let _ = writer.join();
     let _ = child.wait();
 
+    // 2. bodies, streamed
+    let (mut child, writer) = cat_file(repo, "--batch", keep.iter().map(|k| k.0.clone()).collect())?;
+    let mut out = BufReader::new(child.stdout.take().ok_or("no stdout")?);
     let mut seen: BTreeMap<PathBuf, usize> = BTreeMap::new();
     let mut written = BTreeMap::new();
-    let mut pos = 0usize;
-    for (sha, path) in blobs {
-        let nl = data[pos..].iter().position(|&b| b == b'\n').ok_or("short cat-file output")? + pos;
-        let header = String::from_utf8_lossy(&data[pos..nl]).into_owned();
-        pos = nl + 1;
-        let h: Vec<&str> = header.split(' ').collect();
-        if h.len() != 3 || h[0] != sha {
-            return Err(format!("unexpected cat-file header: {header}"));
+    for (sha, path, size) in keep {
+        let mut header = String::new();
+        out.read_line(&mut header).map_err(|e| e.to_string())?;
+        if !header.starts_with(sha.as_str()) {
+            return Err(format!("unexpected cat-file header: {}", header.trim()));
         }
-        if h[1] != "blob" {
-            continue; // "missing" has 2 fields, so it never gets here
-        }
-        let size: usize = h[2].parse().map_err(|_| "bad size")?;
-        let body = data.get(pos..pos + size).ok_or("truncated blob")?;
-        pos += size + 1;
-        let Some(rel) = safe_rel(path) else { continue };
-        if size > MAX_BLOB {
-            continue;
-        }
+        let rel = safe_rel(path).ok_or("unsafe path")?;
         let n = seen.entry(rel.clone()).or_insert(0);
-        let dest_rel = if *n == 0 {
-            rel.clone()
-        } else {
-            Path::new(&format!(".guard-rev-{n}")).join(&rel)
-        };
+        let dest_rel = if *n == 0 { rel.clone() } else { Path::new(&format!(".guard-rev-{n}")).join(&rel) };
         *n += 1;
         let dest = dir.join(&dest_rel);
         if let Some(p) = dest.parent() {
             fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
-        fs::write(&dest, body).map_err(|e| e.to_string())?;
+        let mut f = fs::File::create(&dest).map_err(|e| e.to_string())?;
+        let copied = std::io::copy(&mut (&mut out).take(size), &mut f).map_err(|e| e.to_string())?;
+        if copied != size {
+            return Err("truncated blob".into());
+        }
+        let mut nl = [0u8; 1];
+        out.read_exact(&mut nl).map_err(|e| e.to_string())?;
         written.insert(dest_rel, path.clone());
     }
+    let _ = writer.join();
+    let _ = child.wait();
     Ok(written)
 }
 
@@ -250,10 +262,6 @@ fn scratch() -> Result<PathBuf, String> {
     let d = std::env::temp_dir().join(format!("guard-push-{}-{nanos}", std::process::id()));
     fs::create_dir_all(&d).map_err(|e| format!("cannot create {}: {e}", d.display()))?;
     Ok(d)
-}
-
-fn env_is(k: &str, v: &str) -> bool {
-    std::env::var(k).map(|x| x.eq_ignore_ascii_case(v)).unwrap_or(false)
 }
 
 fn banner(msg: &str) {
@@ -273,10 +281,8 @@ fn check(repo: &Path, refs: &[PushRef], remote: Option<&str>) -> Result<bool, St
         }
         // the tree the remote ends up with, too: pushing on top of a branch
         // that is already infected is blocked until the infection is
-        // committed away (GUARD_PUSH_SCOPE=new: only what the push adds)
-        if !env_is("GUARD_PUSH_SCOPE", "new") {
-            tree_blobs(repo, &r.local_sha, &mut blobs)?;
-        }
+        // committed away
+        tree_blobs(repo, &r.local_sha, &mut blobs)?;
     }
     if blobs.is_empty() {
         return Ok(false);
@@ -294,12 +300,7 @@ fn check(repo: &Path, refs: &[PushRef], remote: Option<&str>) -> Result<bool, St
 pub fn main(rest: &[String]) -> u8 {
     // read stdin first, always: git (or a chained hook) is writing to us
     let mut input = String::new();
-    let read = std::io::stdin().read_to_string(&mut input);
-    if env_is("GUARD_PUSH", "off") {
-        banner("GUARD_PUSH=off: pre-push scan skipped");
-        return 0;
-    }
-    if let Err(e) = read {
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
         eprintln!("guard scan-push: cannot read stdin: {e}");
         return 1;
     }
@@ -308,20 +309,20 @@ pub fn main(rest: &[String]) -> u8 {
         Ok(s) => PathBuf::from(s.trim()),
         Err(e) => return fail(&e),
     };
+    if let Some(why) = super::trust::trusted(&repo) {
+        eprintln!("[GUARD] pre-push scan skipped: {why}");
+        return 0;
+    }
     let remote = rest.first().map(String::as_str).unwrap_or("?");
     match check(&repo, &refs, rest.first().map(String::as_str)) {
         Ok(false) => 0,
         Ok(true) => {
             banner(&format!("PUSH BLOCKED: malware signatures in the commits being pushed to '{remote}'."));
             banner("Paths above are relative to the pushed content (.guard-rev-N/ = an older version of that file in this push).");
-            if env_is("GUARD_PUSH_QUARANTINE", "0") {
-                banner("GUARD_PUSH_QUARANTINE=0: working tree left untouched. Clean it with: guard clean .");
-            } else {
-                banner("Cleaning the working tree (reversible; see `guard restore <path>`):");
-                let code = super::remediate_main("clean", &[repo.to_string_lossy().into_owned()]);
-                if code != 0 {
-                    banner("automatic clean failed; run `guard clean .` manually");
-                }
+            banner("Cleaning the working tree (reversible; see `guard restore <path>`):");
+            let code = super::remediate_main("clean", &[repo.to_string_lossy().into_owned()]);
+            if code != 0 {
+                banner("automatic clean failed; run `guard clean .` manually");
             }
             banner("Infected content is still in your local commits. Remove it (e.g. rewrite with");
             banner("git rebase -i / git commit --amend), re-run the push, and never push it with --no-verify.");
@@ -332,14 +333,9 @@ pub fn main(rest: &[String]) -> u8 {
 }
 
 fn fail(e: &str) -> u8 {
-    if env_is("GUARD_PUSH_FAIL_OPEN", "1") {
-        banner(&format!("pre-push scan failed ({e}); GUARD_PUSH_FAIL_OPEN=1 so the push continues"));
-        0
-    } else {
-        banner(&format!("PUSH BLOCKED: pre-push scan could not run ({e})."));
-        banner("Fix the error, or set GUARD_PUSH_FAIL_OPEN=1 for this push if you are sure it is clean.");
-        1
-    }
+    banner(&format!("PUSH BLOCKED: pre-push scan could not run ({e})."));
+    banner("Fix the error and push again.");
+    1
 }
 
 #[cfg(test)]

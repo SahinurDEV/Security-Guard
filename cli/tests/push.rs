@@ -65,7 +65,6 @@ fn scan_push(t: &Tmp, work: &Path, stdin: &str) -> Out {
         .home(&t.join("home"))
         .cwd(work)
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GUARD_PUSH_QUARANTINE", "0")
         .stdin(stdin.as_bytes())
         .run()
 }
@@ -144,23 +143,34 @@ fn branch_delete_and_empty_push_pass() {
 }
 
 #[test]
-fn opt_out_and_fail_closed() {
-    let t = Tmp::new("push-opts");
+fn fail_closed_when_git_cannot_resolve_the_push() {
+    let t = Tmp::new("push-failclosed");
     let (work, base) = setup(&t);
-    let tip = commit(&work, "public/fonts/icons.otf", FAKE_FONT, "x");
-    let o = guard(&["scan-push"])
-        .home(&t.join("home"))
-        .cwd(&work)
-        .env("GUARD_PUSH", "off")
-        .stdin(line(&tip, &base).as_bytes())
-        .run();
-    assert_eq!(o.code, 0);
-    assert!(o.stderr.contains("GUARD_PUSH=off"));
     // an unknown local sha: git can't tell what is pushed -> blocked
     let bogus = "1234567890123456789012345678901234567890";
     let o = scan_push(&t, &work, &line(bogus, &base));
     assert_eq!(o.code, 1, "{}", o.shown_all());
     assert!(o.stderr.contains("could not run"));
+}
+
+#[test]
+fn guard_own_repo_is_exempt_but_look_alikes_are_not() {
+    let t = Tmp::new("push-trust");
+    let (work, base) = setup(&t);
+    let tip = commit(&work, "public/fonts/icons.otf", FAKE_FONT, "x");
+    // a look-alike remote (other owner) gets no pass
+    git(&work, &["remote", "add", "up", "https://github.com/evil/Security-Guard.git"]);
+    assert_eq!(scan_push(&t, &work, &line(&tip, &base)).code, 1);
+    // the official remote URL (set in .git/config, never cloned in) does
+    git(&work, &["remote", "set-url", "up", "git@github.com:Syed-Bipul-Rahman/Security-Guard.git"]);
+    let o = scan_push(&t, &work, &line(&tip, &base));
+    assert_eq!(o.code, 0, "{}", o.shown_all());
+    assert!(o.stderr.contains("Guard's own repository"), "{}", o.stderr);
+    // or the per-user allowlist
+    git(&work, &["remote", "remove", "up"]);
+    assert_eq!(scan_push(&t, &work, &line(&tip, &base)).code, 1);
+    write(&t.join("home/trusted-repos"), format!("# mine\n{}\n", s(&work)));
+    assert_eq!(scan_push(&t, &work, &line(&tip, &base)).code, 0);
 }
 
 #[test]
@@ -205,8 +215,7 @@ fn hook_blocks_git_push_and_force_push() {
             .env("GIT_CONFIG_GLOBAL", empty_gitconfig())
             .env("GUARD_BIN", bin())
             .env("GUARD_HOME", t.join("home"))
-            .env("GUARD_PUSH_QUARANTINE", "0")
-            .env("GUARD_COMMUNITY_RULES", "0")
+                .env("GUARD_COMMUNITY_RULES", "0")
             .output()
             .unwrap()
     };
@@ -234,22 +243,14 @@ fn commits_only_on_another_remote_are_scanned() {
         guard(&["scan-push", remote, "url"])
             .home(&t.join("home"))
             .cwd(&work)
-            .env("GUARD_PUSH_QUARANTINE", "0")
-            .stdin(new.as_bytes())
+                .stdin(new.as_bytes())
             .run()
     };
     assert_eq!(run("mirror").code, 1);
     assert_eq!(run(&s(&mirror)).code, 1, "push to a bare path scans everything");
     // origin already has those commits, but its tip is still infected
     assert_eq!(run("origin").code, 1, "pushing onto an infected branch is blocked");
-    let o = guard(&["scan-push", "origin", "url"])
-        .home(&t.join("home"))
-        .cwd(&work)
-        .env("GUARD_PUSH_QUARANTINE", "0")
-        .env("GUARD_PUSH_SCOPE", "new")
-        .stdin(new.as_bytes())
-        .run();
-    assert_eq!(o.code, 0, "scope=new: origin already has these commits");
+
 }
 
 #[test]
@@ -261,7 +262,8 @@ fn committing_the_cleanup_unblocks_the_push() {
     let infected = git(&work, &["rev-parse", "HEAD"]);
     let on_top = commit(&work, "b.txt", "b\n", "work on top");
     assert_eq!(scan_push(&t, &work, &line(&on_top, &infected)).code, 1);
-    fs::remove_file(work.join("public/fonts/icons.otf")).unwrap();
+    // the blocked push already quarantined it from the working tree
+    let _ = fs::remove_file(work.join("public/fonts/icons.otf"));
     git(&work, &["add", "-A"]);
     git(&work, &["commit", "-q", "--no-verify", "-m", "remove malware"]);
     let clean = git(&work, &["rev-parse", "HEAD"]);

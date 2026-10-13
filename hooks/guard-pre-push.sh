@@ -7,8 +7,7 @@
 #
 # Bypass: `git push --no-verify` skips ALL client-side pre-push hooks - git
 # itself never runs this file then. Use server-side protection (README "Push
-# protection") for a gate that can't be skipped. GUARD_PUSH=off skips just
-# this scan for one command and says so.
+# protection") for a gate that can't be skipped.
 
 set -u
 
