@@ -206,3 +206,30 @@ fn hook_blocks_git_push_and_force_push() {
     // documented: git never runs pre-push hooks with --no-verify
     assert!(push(&["--no-verify"]).status.success());
 }
+
+#[test]
+fn commits_only_on_another_remote_are_scanned() {
+    // an infected upstream (origin) pushed to a new remote must be blocked,
+    // while a new branch on origin itself skips what origin already has
+    let t = Tmp::new("push-other-remote");
+    let (work, _) = setup(&t);
+    let tip = commit(&work, "public/fonts/icons.otf", FAKE_FONT, "x");
+    git(&work, &["push", "-q", "--no-verify", "origin", "main"]);
+    git(&work, &["fetch", "-q", "origin"]);
+    let mirror = t.join("mirror.git");
+    fs::create_dir_all(&mirror).unwrap();
+    git(&mirror, &["init", "-q", "--bare"]);
+    git(&work, &["remote", "add", "mirror", &s(&mirror)]);
+    let new = format!("refs/heads/main {tip} refs/heads/main {ZERO}\n");
+    let run = |remote: &str| {
+        guard(&["scan-push", remote, "url"])
+            .home(&t.join("home"))
+            .cwd(&work)
+            .env("GUARD_PUSH_QUARANTINE", "0")
+            .stdin(new.as_bytes())
+            .run()
+    };
+    assert_eq!(run("mirror").code, 1);
+    assert_eq!(run(&s(&mirror)).code, 1, "push to a bare path scans everything");
+    assert_eq!(run("origin").code, 0, "origin already has these commits");
+}

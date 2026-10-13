@@ -112,15 +112,27 @@ pub fn safe_rel(p: &str) -> Option<PathBuf> {
 /// The commits this push adds to the remote. Force pushes are covered: the
 /// range is "reachable from the new tip, not from what the remote had", which
 /// does not require the old tip to be an ancestor.
-fn new_commits(repo: &Path, r: &PushRef) -> Result<Vec<String>, String> {
-    let mut args = vec!["rev-list", r.local_sha.as_str(), "--not"];
+fn new_commits(repo: &Path, r: &PushRef, remote: Option<&str>) -> Result<Vec<String>, String> {
+    let mut args = vec!["rev-list".to_string(), r.local_sha.clone(), "--not".into()];
     if !is_zero(&r.remote_sha) && has_commit(repo, &r.remote_sha) {
-        args.push(r.remote_sha.as_str());
+        args.push(r.remote_sha.clone());
     }
     // a new branch, or a force push whose old tip we never fetched: everything
-    // no remote-tracking ref already has
-    args.push("--remotes");
+    // the DESTINATION remote's tracking refs don't already have. Commits that
+    // are only on another remote (an infected upstream pushed to a new place)
+    // are scanned; a push to a bare URL scans everything it sends.
+    if let Some(name) = remote {
+        args.push(format!("--remotes={name}"));
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     Ok(git(repo, &args)?.lines().map(str::to_string).collect())
+}
+
+/// The pushed-to remote, when it is a configured remote name (not a URL/path).
+fn configured_remote(repo: &Path, name: Option<&str>) -> Option<String> {
+    let name = name?;
+    let list = git(repo, &["remote"]).ok()?;
+    list.lines().any(|l| l == name).then(|| name.to_string())
 }
 
 /// (blob sha, path) for every file a commit adds or modifies.
@@ -233,13 +245,14 @@ fn banner(msg: &str) {
 }
 
 /// The gate itself; Ok(true) = infected.
-fn check(repo: &Path, refs: &[PushRef]) -> Result<bool, String> {
+fn check(repo: &Path, refs: &[PushRef], remote: Option<&str>) -> Result<bool, String> {
+    let remote = configured_remote(repo, remote);
     let mut blobs = BTreeSet::new();
     for r in refs {
         if is_zero(&r.local_sha) {
             continue; // deleting a remote ref pushes no content
         }
-        for c in new_commits(repo, r)? {
+        for c in new_commits(repo, r, remote.as_deref())? {
             changed_blobs(repo, &c, &mut blobs)?;
         }
     }
@@ -272,7 +285,7 @@ pub fn main(rest: &[String]) -> u8 {
         Err(e) => return fail(&e),
     };
     let remote = rest.first().map(String::as_str).unwrap_or("?");
-    match check(&repo, &refs) {
+    match check(&repo, &refs, rest.first().map(String::as_str)) {
         Ok(false) => 0,
         Ok(true) => {
             banner(&format!("PUSH BLOCKED: malware signatures in the commits being pushed to '{remote}'."));
