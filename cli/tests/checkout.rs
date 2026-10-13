@@ -1,5 +1,5 @@
 //! `guard scan-checkout` (the post-checkout / post-merge hook body):
-//! quarantine on clone, warn-only opt-out, incremental scans. Inert fixtures
+//! quarantine on clone, incremental scans, trust exemption. Inert fixtures
 //! only: a ".otf" whose body is a harmless line of JS.
 
 mod common;
@@ -55,7 +55,11 @@ fn add(r: &Path, file: &str, body: &str) -> String {
     git(r, &["rev-parse", "HEAD"])
 }
 
-fn hook(t: &Tmp, r: &Path, args: &[&str], warn: bool) -> Out {
+fn hook(t: &Tmp, r: &Path, args: &[&str]) -> Out {
+    hook_in(t, r, args, "")
+}
+
+fn hook_in(t: &Tmp, r: &Path, args: &[&str], stdin: &str) -> Out {
     let mut a = vec!["scan-checkout"];
     a.extend_from_slice(args);
     guard(&a)
@@ -63,7 +67,7 @@ fn hook(t: &Tmp, r: &Path, args: &[&str], warn: bool) -> Out {
         .cwd(r)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", empty_gitconfig())
-        .env("GUARD_ON_CLONE", if warn { "warn" } else { "" })
+        .stdin(stdin.as_bytes())
         .run()
 }
 
@@ -74,7 +78,7 @@ fn clone_quarantines_by_default() {
     let t = Tmp::new("co-clone");
     let r = repo(&t);
     let head = add(&r, "public/fonts/icons.otf", FAKE_FONT);
-    let o = hook(&t, &r, &["post-checkout", NULL, &head, "1"], false);
+    let o = hook(&t, &r, &["post-checkout", NULL, &head, "1"]);
     assert_eq!(o.code, 0, "hooks never fail git");
     assert!(o.stderr.contains("MALWARE detected"), "{}", o.stderr);
     assert!(o.stderr.contains("public/fonts/icons.otf"), "{}", o.stderr);
@@ -89,23 +93,11 @@ fn clone_quarantines_by_default() {
 }
 
 #[test]
-fn warn_only_changes_nothing() {
-    let t = Tmp::new("co-warn");
-    let r = repo(&t);
-    let head = add(&r, "public/fonts/icons.otf", FAKE_FONT);
-    let o = hook(&t, &r, &["post-checkout", NULL, &head, "1"], true);
-    assert_eq!(o.code, 0);
-    assert!(o.stderr.contains("Warn-only"), "{}", o.stderr);
-    assert!(o.stderr.contains("guard clean"), "{}", o.stderr);
-    assert!(r.join("public/fonts/icons.otf").exists());
-}
-
-#[test]
 fn clean_clone_is_silent() {
     let t = Tmp::new("co-quiet");
     let r = repo(&t);
     let head = git(&r, &["rev-parse", "HEAD"]);
-    let o = hook(&t, &r, &["post-checkout", NULL, &head, "1"], false);
+    let o = hook(&t, &r, &["post-checkout", NULL, &head, "1"]);
     assert_eq!((o.code, o.stderr.as_str()), (0, ""));
 }
 
@@ -116,11 +108,11 @@ fn checkout_scans_only_changed_files() {
     // an infected file that is NOT part of the switch below
     let base = add(&r, "public/fonts/old.otf", FAKE_FONT);
     let new = add(&r, "public/fonts/new.otf", FAKE_FONT);
-    let o = hook(&t, &r, &["post-checkout", &base, &new, "1"], true);
+    let o = hook(&t, &r, &["post-checkout", &base, &new, "1"]);
     assert!(o.stderr.contains("changed files"), "{}", o.stderr);
     assert!(o.stderr.contains("new.otf") && !o.stderr.contains("old.otf"), "{}", o.stderr);
     // same commit (e.g. git checkout -b): nothing changed, nothing to say
-    let o = hook(&t, &r, &["post-checkout", &new, &new, "1"], false);
+    let o = hook(&t, &r, &["post-checkout", &new, &new, "1"]);
     assert_eq!(o.stderr, "");
     assert!(r.join("public/fonts/old.otf").exists());
 }
@@ -131,7 +123,7 @@ fn incremental_hit_is_quarantined() {
     let r = repo(&t);
     let base = git(&r, &["rev-parse", "HEAD"]);
     let new = add(&r, "public/fonts/new.otf", FAKE_FONT);
-    let o = hook(&t, &r, &["post-checkout", &base, &new, "1"], false);
+    let o = hook(&t, &r, &["post-checkout", &base, &new, "1"]);
     assert!(o.stderr.contains("moved to quarantine"), "{}", o.stderr);
     assert!(!r.join("public/fonts/new.otf").exists());
 }
@@ -143,7 +135,7 @@ fn post_merge_uses_orig_head() {
     let base = git(&r, &["rev-parse", "HEAD"]);
     add(&r, "public/fonts/new.otf", FAKE_FONT);
     git(&r, &["update-ref", "ORIG_HEAD", &base]);
-    let o = hook(&t, &r, &["post-merge", "0"], true);
+    let o = hook(&t, &r, &["post-merge", "0"]);
     assert!(o.stderr.contains("changed files") && o.stderr.contains("new.otf"), "{}", o.stderr);
 }
 
@@ -153,4 +145,29 @@ fn outside_a_repo_and_bad_usage() {
     assert_eq!(guard(&["scan-checkout"]).run().code, 2);
     let o = guard(&["scan-checkout", "post-checkout"]).home(&t.join("home")).cwd(&t.path).run();
     assert_eq!(o.code, 0);
+}
+
+#[test]
+fn post_rewrite_scans_only_the_rewritten_commits() {
+    let t = Tmp::new("co-rewrite");
+    let r = repo(&t);
+    let base = add(&r, "public/fonts/old.otf", FAKE_FONT);
+    let new = add(&r, "public/fonts/new.otf", FAKE_FONT);
+    let o = hook_in(&t, &r, &["post-rewrite", "amend"], &format!("{base} {new}\n"));
+    assert!(o.stderr.contains("changed files") && o.stderr.contains("new.otf"), "{}", o.stderr);
+    assert!(!o.stderr.contains("old.otf"), "{}", o.stderr);
+    // no pairs at all: nothing to diff, falls back to the whole tree
+    let o = hook_in(&t, &r, &["post-rewrite", "rebase"], "");
+    assert!(o.stderr.contains("working tree") && o.stderr.contains("old.otf"), "{}", o.stderr);
+}
+
+#[test]
+fn guard_own_repo_is_left_alone() {
+    let t = Tmp::new("co-trust");
+    let r = repo(&t);
+    let head = add(&r, "public/fonts/icons.otf", FAKE_FONT);
+    git(&r, &["remote", "add", "origin", "https://github.com/Syed-Bipul-Rahman/Security-Guard.git"]);
+    let o = hook(&t, &r, &["post-checkout", NULL, &head, "1"]);
+    assert!(o.stderr.contains("scan skipped"), "{}", o.stderr);
+    assert!(r.join("public/fonts/icons.otf").exists());
 }

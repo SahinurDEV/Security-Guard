@@ -1,23 +1,24 @@
 //! `guard scan-checkout <hook> [hook args]`: what the post-checkout,
 //! post-merge and post-rewrite hooks run.
 //!
-//! * A clone (post-checkout from the null commit), a rewrite, or a change
-//!   touching more than INCREMENTAL_MAX files: scan the whole working tree.
-//! * A branch switch / pull: scan only the files that changed (`git diff
-//!   <old> <new>`), copied into a scratch dir so the scan sees exactly them.
-//!   That keeps a `git checkout` in a big repo fast.
+//! * A clone (post-checkout from the null commit), or a change touching more
+//!   than INCREMENTAL_MAX files: scan the whole working tree.
+//! * A branch switch / pull / amend / rebase: scan only the files that
+//!   changed (`git diff <old> <new>`; post-rewrite reads git's `<old> <new>`
+//!   pairs from stdin), copied into a scratch dir so the scan sees exactly
+//!   them. Nothing changed: return before any rules are loaded.
 //!
-//! On a critical hit the default is to QUARANTINE: injected code is cut out
-//! of real files (backed up first), whole-file droppers go to the quarantine
-//! vault, VS Code auto-run settings are neutralised, and every change can be
-//! undone with `guard restore <path>`. Warn-only instead:
-//! `git config --global guard.onClone warn` (or GUARD_ON_CLONE=warn).
+//! Every finding is QUARANTINED, no opt-out: injected code is cut out of real
+//! files (backed up first), whole-file droppers go to the quarantine vault,
+//! VS Code auto-run settings are neutralised, and every change can be undone
+//! with `guard restore <path>`. Guard's own repository is exempt (trust.rs).
 //!
 //! Always exits 0: git ignores post-* hook status anyway, and a scan problem
 //! must never break a checkout. Problems are printed instead.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -40,55 +41,73 @@ fn is_null(sha: &str) -> bool {
     sha.is_empty() || sha.bytes().all(|b| b == b'0')
 }
 
-/// The files to scan: None = the whole tree.
-pub fn changed(repo: &Path, hook: &str, args: &[String]) -> Option<Vec<String>> {
-    let (old, new) = match hook {
-        // <prev HEAD> <new HEAD> <1 = branch checkout>; prev is null on clone
-        "post-checkout" => (args.first()?.clone(), args.get(1)?.clone()),
-        // pull/merge: what ORIG_HEAD was before it
-        "post-merge" => (git(repo, &["rev-parse", "-q", "--verify", "ORIG_HEAD"])?.trim().to_string(), "HEAD".into()),
-        _ => return None,
-    };
-    if is_null(&old) {
-        return None;
-    }
-    let out = git(repo, &["diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACMRT", &old, &new])?;
-    let files: Vec<String> = out.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect();
-    (files.len() <= INCREMENTAL_MAX).then_some(files)
+fn diff(repo: &Path, old: &str, new: &str, out: &mut BTreeSet<String>) -> Option<()> {
+    let raw = git(repo, &["diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACMRT", old, new])?;
+    out.extend(raw.split('\0').filter(|s| !s.is_empty()).map(str::to_string));
+    Some(())
 }
 
-fn mode_warn() -> bool {
-    let env = std::env::var("GUARD_ON_CLONE").unwrap_or_default();
-    let v = if env.is_empty() {
-        Command::new("git")
-            .args(["config", "--get", "guard.onClone"])
-            .stderr(Stdio::null())
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
-    } else {
-        env
-    };
-    v.eq_ignore_ascii_case("warn")
+/// The files to scan: None = the whole tree.
+pub fn changed(repo: &Path, hook: &str, args: &[String], stdin: &str) -> Option<Vec<String>> {
+    let mut files = BTreeSet::new();
+    match hook {
+        // <prev HEAD> <new HEAD> <1 = branch checkout>; prev is null on clone
+        "post-checkout" => {
+            let (old, new) = (args.first()?, args.get(1)?);
+            if is_null(old) {
+                return None;
+            }
+            diff(repo, old, new, &mut files)?;
+        }
+        // pull/merge: what ORIG_HEAD was before it
+        "post-merge" => {
+            let old = git(repo, &["rev-parse", "-q", "--verify", "ORIG_HEAD"])?;
+            diff(repo, old.trim(), "HEAD", &mut files)?;
+        }
+        // amend/rebase: "<old> <new> [extra]" per rewritten commit
+        "post-rewrite" => {
+            let mut any = false;
+            for l in stdin.lines() {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                if f.len() >= 2 {
+                    diff(repo, f[0], f[1], &mut files)?;
+                    any = true;
+                }
+            }
+            if !any {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    (files.len() <= INCREMENTAL_MAX).then(|| files.into_iter().collect())
 }
 
 fn red(s: &str) {
     eprintln!("\x1b[31m[GUARD] {s}\x1b[0m");
 }
 
-/// Repo-relative paths of critical findings.
-fn critical_paths(results: &Value) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
+/// Repo-relative path -> is it a whole-file threat (fake binary / AV hit),
+/// for every finding of any severity except informational ones.
+fn hit_paths(results: &Value, root: &str) -> BTreeMap<String, bool> {
+    let root = root.replace('\\', "/");
+    let mut out: BTreeMap<String, bool> = BTreeMap::new();
     if let Value::Object(m) = results {
-        for v in m.values() {
+        for (bucket, v) in m {
             for f in v.as_array().into_iter().flatten() {
-                if f.get("severity").and_then(Value::as_str) != Some("critical") {
+                let sev = f.get("severity").and_then(Value::as_str).unwrap_or("");
+                let id = f.get("sig_id").and_then(Value::as_str).unwrap_or("");
+                if sev.is_empty() || sev == "info" || sev == "ok" || id.starts_with("scan.") {
                     continue;
                 }
                 let p = f.get("path").or_else(|| f.get("where")).and_then(Value::as_str).unwrap_or("");
-                if !p.is_empty() {
-                    out.insert(p.replace('\\', "/"));
+                let p = p.replace('\\', "/");
+                let rel = p.strip_prefix(&root).unwrap_or(&p).trim_start_matches('/').to_string();
+                if rel.is_empty() {
+                    continue;
                 }
+                let whole = bucket == "magic" || bucket == "av";
+                *out.entry(rel).or_insert(false) |= whole;
             }
         }
     }
@@ -102,13 +121,16 @@ fn scratch() -> Option<PathBuf> {
     Some(d)
 }
 
-fn run(repo: &Path, hook: &str, args: &[String]) -> Result<(), String> {
+fn run(repo: &Path, hook: &str, args: &[String], stdin: &str) -> Result<(), String> {
+    let files = changed(repo, hook, args, stdin);
+    // nothing changed: done before any rules are compiled
+    if files.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(());
+    }
     let sig = sigs::load(None)?;
     let mut sc = Scanner::new(&sig, true)?;
-    let files = changed(repo, hook, args);
     let repo_s = repo.to_string_lossy().into_owned();
-    let (results, hits): (Value, Vec<String>) = match &files {
-        Some(list) if list.is_empty() => return Ok(()),
+    let hits = match &files {
         Some(list) => {
             let dir = scratch().ok_or("cannot create a scratch dir")?;
             for f in list {
@@ -123,79 +145,43 @@ fn run(repo: &Path, hook: &str, args: &[String]) -> Result<(), String> {
                 }
                 let _ = fs::copy(&src, &dst);
             }
-            let r = sc.scan_tree(&dir.to_string_lossy());
+            let d = dir.to_string_lossy().into_owned();
+            let r = sc.scan_tree(&d);
             let _ = fs::remove_dir_all(&dir);
-            let hits = critical_paths(&r)
-                .into_iter()
-                .map(|p| p.trim_start_matches(&*dir.to_string_lossy().replace('\\', "/")).trim_start_matches('/').to_string())
-                .collect();
-            (r, hits)
+            hit_paths(&r, &d)
         }
-        None => {
-            let r = sc.scan_tree(&repo_s);
-            let hits = critical_paths(&r)
-                .into_iter()
-                .map(|p| p.trim_start_matches(&*repo_s.replace('\\', "/")).trim_start_matches('/').to_string())
-                .collect();
-            (r, hits)
-        }
+        None => hit_paths(&sc.scan_tree(&repo_s), &repo_s),
     };
-    if results["infected"] != Value::Bool(true) {
+    if hits.is_empty() {
         return Ok(());
     }
     let scope = if files.is_some() { "changed files" } else { "working tree" };
-    red(&format!("MALWARE detected in {repo_s} ({hook}, {scope}):"));
-    for h in &hits {
-        red(&format!("  {h}"));
-    }
-    let vscode = results["vscode"].as_array().is_some_and(|a| !a.is_empty());
-    if mode_warn() {
-        if vscode {
-            red("DO NOT OPEN THIS FOLDER IN VS CODE: it has an auto-run task.");
-        }
-        red("Warn-only mode (guard.onClone=warn): nothing was changed.");
-        red(&format!("Quarantine it now with: guard clean \"{repo_s}\""));
-        red("Do NOT open this folder in an editor or run npm/node in it until it is clean.");
-        return Ok(());
-    }
+    red(&format!("MALWARE detected in {repo_s} ({hook}, {scope}) - quarantining:"));
     let rem = Remediator::new(&crate::util::guard_home());
-    let summary = if files.is_none() {
-        rem.clean_repo(&repo_s)?
-    } else {
-        let mut acts = serde_json::Map::new();
-        for h in &hits {
-            let p = repo.join(h);
-            if p.is_file() {
-                if let Ok(v) = rem.clean_file(&p.to_string_lossy()) {
-                    let a = v.get("action").and_then(Value::as_str).unwrap_or("noop").to_string();
-                    acts.entry(a).or_insert_with(|| Value::Array(vec![])).as_array_mut().unwrap().push(Value::String(h.clone()));
-                }
+    let mut failed = vec![];
+    for (rel, whole) in &hits {
+        let p = repo.join(rel);
+        if !p.exists() {
+            continue;
+        }
+        match rem.remediate_file(&p.to_string_lossy(), *whole) {
+            Ok(v) => {
+                let label = match v.get("action").and_then(Value::as_str).unwrap_or("") {
+                    "quarantine" => "moved to quarantine",
+                    "neutralize" => "injected code removed (file kept)",
+                    "clean-settings" | "clean-tasks" => "VS Code auto-run removed",
+                    _ => "checked, nothing to cut",
+                };
+                red(&format!("  {label}: {rel}"));
             }
-        }
-        Value::Object(acts)
-    };
-    let mut any = false;
-    for (k, label) in [
-        ("quarantined", "moved to quarantine"),
-        ("quarantine", "moved to quarantine"),
-        ("neutralized", "injected code removed (file kept)"),
-        ("neutralize", "injected code removed (file kept)"),
-        ("config_cleaned", "VS Code auto-run removed"),
-        ("clean-settings", "VS Code auto-run removed"),
-        ("clean-tasks", "VS Code auto-run removed"),
-    ] {
-        for p in summary.get(k).and_then(Value::as_array).into_iter().flatten() {
-            any = true;
-            red(&format!("  {label}: {}", p.as_str().unwrap_or("")));
+            Err(e) => failed.push(format!("{rel} ({e})")),
         }
     }
-    if any {
-        red("Every change is backed up. Undo one with: guard restore <path>");
-        red("Your working tree now differs from the commit: review with `git status` / `git diff`.");
-    } else {
-        red(&format!("Could not clean automatically; run: guard clean \"{repo_s}\""));
+    for f in &failed {
+        red(&format!("  COULD NOT CLEAN: {f}"));
     }
-    red("Warn-only instead of quarantine: git config --global guard.onClone warn");
+    red("Every change is backed up. Undo one with: guard restore <path>");
+    red("Your working tree now differs from the commit: review with `git status` / `git diff`.");
     Ok(())
 }
 
@@ -204,11 +190,19 @@ pub fn main(rest: &[String]) -> u8 {
         eprintln!("usage: guard scan-checkout <post-checkout|post-merge|post-rewrite> [hook args]");
         return 2;
     };
+    let mut stdin = String::new();
+    if hook == "post-rewrite" {
+        let _ = std::io::stdin().read_to_string(&mut stdin);
+    }
     let Some(top) = git(Path::new("."), &["rev-parse", "--show-toplevel"]) else {
         return 0; // bare repo or not a work tree: nothing on disk to scan
     };
     let repo = PathBuf::from(top.trim());
-    if let Err(e) = run(&repo, hook, args) {
+    if let Some(why) = super::trust::trusted(&repo) {
+        eprintln!("[GUARD] scan skipped: {why}");
+        return 0;
+    }
+    if let Err(e) = run(&repo, hook, args, &stdin) {
         red(&format!("scan after {hook} failed: {e}. Run: guard scan \"{}\"", repo.display()));
     }
     0

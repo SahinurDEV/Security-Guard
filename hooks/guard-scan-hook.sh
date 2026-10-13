@@ -5,7 +5,7 @@
 #
 # Installed as a global git hook (core.hooksPath) so it fires for EVERY repo,
 # including freshly cloned ones. On malware it quarantines the infected files
-# (reversible) unless guard.onClone=warn.
+# (reversible). No opt-out.
 #
 # Wired to: post-checkout, post-merge, post-rewrite  (git has no post-clone, but
 # a clone runs a post-checkout, so clones are covered).
@@ -52,8 +52,8 @@ echo "$(date -u +%FT%TZ)  $hook_name  $REPO_ROOT" >> "$log" 2>/dev/null || true
 
 # Scan what arrived (a clone: the whole tree; a checkout/pull: just the
 # changed files) and, on a hit, quarantine it - reversible with
-# `guard restore <path>`. Warn-only: git config --global guard.onClone warn
-"$GUARD" scan-checkout "$hook_name" "$@" >>"$log"
+# `guard restore <path>`. post-rewrite's "<old> <new>" pairs are passed on.
+printf '%s\n' "${GUARD_CHAIN_STDIN:-}" | "$GUARD" scan-checkout "$hook_name" "$@" >>"$log"
 fi
 
 # --- chain to the hooks Guard displaced (husky, lefthook, pre-commit, ...) ---

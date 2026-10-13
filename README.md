@@ -300,16 +300,17 @@ the release workflow refuses to build if it fails.
 The `post-checkout` hook runs at the end of every `git clone`, and with
 `post-merge` / `post-rewrite` it runs `guard scan-checkout`:
 
-- **clone / rebase:** scan the whole working tree. **branch switch / pull:** scan
-  only the files that changed, which keeps big repos fast.
-- **On a hit it quarantines by default**, before you open the folder: injected
-  code is cut out of real files, whole-file droppers (fake fonts) go to the
-  encrypted quarantine vault, and VS Code auto-run settings are removed. The hook
-  lists every file and what was done to it. Each change is backed up and can be
-  undone with `guard restore <path>`. The working tree will then differ from the
-  commit, so review with `git status`.
-- **Warn-only:** `git config --global guard.onClone warn` (or `GUARD_ON_CLONE=warn`)
-  reports and changes nothing. Quarantine later with `guard clean <repo>`.
+- **clone:** scan the whole working tree. **branch switch / pull / amend /
+  rebase:** scan only the files that changed (post-rewrite gets git's
+  `<old> <new>` pairs). When nothing changed it returns before loading any
+  rules, so it costs almost nothing.
+- **Every finding is quarantined**, before you open the folder, with no opt-out:
+  injected code is cut out of real files, whole-file droppers (fake fonts) go to
+  the encrypted quarantine vault, and VS Code auto-run settings are removed. The
+  hook lists every file and what was done to it. Each change is backed up and can
+  be undone with `guard restore <path>`. Review with `git status`.
+- Guard's own repository is exempt, the same way as for pushes (see
+  [Push protection](#push-protection-pre-push-hook)).
 - The hook never fails or blocks git. Scan details go to `~/.guard/hook.log`.
 
 ---
