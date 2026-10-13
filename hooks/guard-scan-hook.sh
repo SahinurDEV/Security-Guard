@@ -18,7 +18,12 @@ set -u
 GUARD_HOME="${GUARD_HOME:-$HOME/.guard}"
 
 # The guard binary: $GUARD_BIN, else the per-user install, else the one on PATH
+# GUARD_INSTALLED_BIN is filled in by `guard hooks install` (the binary that installed us)
+GUARD_INSTALLED_BIN=""
 GUARD="${GUARD_BIN:-}"
+if [ -z "$GUARD" ] && [ -n "$GUARD_INSTALLED_BIN" ] && [ -x "$GUARD_INSTALLED_BIN" ]; then
+    GUARD="$GUARD_INSTALLED_BIN"
+fi
 if [ -z "$GUARD" ]; then
     if [ -x "$GUARD_HOME/bin/guard" ]; then
         GUARD="$GUARD_HOME/bin/guard"

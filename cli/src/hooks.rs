@@ -99,9 +99,15 @@ pub fn install() -> Result<u8, String> {
     }
     let dir = hooks_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let exe = std::env::current_exe()
+        .map(|p| config_value(&p).replace('\'', ""))
+        .unwrap_or_default();
     for (name, body) in HOOKS {
         let p = dir.join(name);
-        fs::write(&p, body.replace("\r\n", "\n")).map_err(|e| format!("{}: {e}", p.display()))?;
+        let body = body
+            .replace("\r\n", "\n")
+            .replacen("GUARD_INSTALLED_BIN=\"\"", &format!("GUARD_INSTALLED_BIN='{exe}'"), 1);
+        fs::write(&p, body).map_err(|e| format!("{}: {e}", p.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
