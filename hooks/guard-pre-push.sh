@@ -32,4 +32,30 @@ if [ -n "$GUARD" ]; then
 else
     printf '[GUARD] guard binary not found; pre-push scan skipped\n' >&2
 fi
-exit 0
+
+# --- chain to the hooks Guard displaced (husky, lefthook, pre-commit, ...) ---
+# 1) the global core.hooksPath that was set before Guard (saved at install),
+# 2) the repo's own .git/hooks/<name> (a global core.hooksPath hides it).
+# A repo whose LOCAL config sets core.hooksPath (husky v9) never reaches this
+# file at all; `guard hooks status` in that repo warns about it.
+guard_chain() {
+    _name=$1; shift
+    _ours=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)
+    _prev=$(cat "$GUARD_HOME/githooks.prev" 2>/dev/null || true)
+    case "$_prev" in "~/"*) _prev="$HOME/${_prev#\~/}" ;; esac
+    _common=$(git rev-parse --git-common-dir 2>/dev/null || true)
+    for _d in "$_prev" "${_common:+$_common/hooks}"; do
+        [ -n "$_d" ] && [ -d "$_d" ] || continue
+        [ "$(cd "$_d" && pwd -P)" = "$_ours" ] && continue
+        [ -x "$_d/$_name" ] || continue
+        if [ -n "${GUARD_CHAIN_STDIN+x}" ]; then
+            printf '%s\n' "$GUARD_CHAIN_STDIN" | "$_d/$_name" "$@" || return $?
+        else
+            "$_d/$_name" "$@" || return $?
+        fi
+    done
+    return 0
+}
+
+GUARD_CHAIN_STDIN=$refs
+guard_chain pre-push "$@"

@@ -174,6 +174,9 @@ step "install.sh: check the install"
 [ -s "$HOME/.guard/watcher.config.json" ] || fail "install.sh wrote no watcher.config.json"
 [ "$(git config --global --get core.hooksPath)" = "$HOME/.guard/githooks" ] \
     || fail "install.sh did not set the global git hooks"
+for h in post-checkout post-merge post-rewrite pre-push; do
+    [ -x "$HOME/.guard/githooks/$h" ] || fail "install.sh did not install the $h hook"
+done
 service_up user || { show_service user; fail "the watcher service is not running"; }
 check_preinstalled "" "$HOME/.guard"
 check_watcher "" "$HOME/.guard"
@@ -192,6 +195,17 @@ git -C "$repo" -c user.name=ci -c user.email=ci@example.com commit -qm bad
 git clone -q "$repo" "$WORK/bad-clone" 2> "$WORK/clone.err" || { cat "$WORK/clone.err"; fail "the hook broke git clone"; }
 cat "$WORK/clone.err"
 grep -q "\[GUARD\] WARNING" "$WORK/clone.err" || fail "the post-checkout hook raised no warning"
+end
+
+step "install.sh: pre-push hook blocks pushing the infected history (normal and --force)"
+git init -q --bare "$WORK/bad-remote.git"
+if git -C "$WORK/bad-clone" push -q "$WORK/bad-remote.git" HEAD:refs/heads/main 2> "$WORK/push.err"; then
+    cat "$WORK/push.err"; fail "an infected push went through"
+fi
+grep -q "PUSH BLOCKED" "$WORK/push.err" || { cat "$WORK/push.err"; fail "no PUSH BLOCKED message"; }
+if git -C "$WORK/bad-clone" push -q --force "$WORK/bad-remote.git" HEAD:refs/heads/main 2>/dev/null; then
+    fail "an infected force push went through"
+fi
 end
 
 step "install.sh: reinstall over the running service"
@@ -259,8 +273,17 @@ one_liner good
 wait_for 30 "the service to run again" service_running system
 end
 
+step "guard.sh: global git hooks for the invoking user"
+[ "$(git config --global --get core.hooksPath)" = "$HOME/.guard/githooks" ] \
+    || fail "guard.sh did not set the global git hooks for $USER"
+[ -x "$HOME/.guard/githooks/pre-push" ] || fail "guard.sh did not install the pre-push hook"
+[ "$(stat -c %U "$HOME/.guard/githooks/pre-push" 2>/dev/null || stat -f %Su "$HOME/.guard/githooks/pre-push")" = "$(id -un)" ] \
+    || fail "the hooks are not owned by $USER"
+end
+
 step "guard uninstall"
 sudo /usr/local/bin/guard uninstall
 wait_for 30 "the service to stop" service_gone system
+[ -z "$(git config --global --get core.hooksPath || true)" ] || fail "guard uninstall left core.hooksPath set"
 end
 echo "installers OK"

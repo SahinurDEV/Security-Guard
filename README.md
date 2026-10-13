@@ -295,6 +295,35 @@ the release workflow refuses to build if it fails.
 
 ---
 
+## Global git hooks (all platforms)
+
+Every installer (`guard.sh`, `guard.ps1`, `install.sh`) runs `guard hooks install`
+for the developer, and under `sudo` it re-runs as `$SUDO_USER`. It writes the hooks
+to `~/.guard/githooks` and points the global `core.hooksPath` there, so they
+apply to every repo and every clone automatically:
+
+| hook | does |
+|---|---|
+| `post-checkout` (runs at the end of every `git clone`), `post-merge`, `post-rewrite` | scan what arrived |
+| `pre-push` | `guard scan-push`: block infected pushes, including force pushes |
+
+On Windows, Git for Windows runs these sh hooks itself; no extra setup needed.
+
+- **Existing hooks keep working.** A global `core.hooksPath` that was set before
+  Guard is saved in `~/.guard/githooks.prev`, and Guard's hooks run it after their
+  own checks. They also run the repo's own `.git/hooks/<name>` (lefthook,
+  pre-commit, hand-written hooks), passing on arguments, stdin and failures.
+- **husky v9** (and anything else that sets a *repo-local* `core.hooksPath`)
+  overrides the global one, so git never runs Guard's hooks in that repo.
+  Clone-time scanning still works because `post-checkout` runs before
+  `npm install` sets husky up, but the pre-push gate does not. `guard hooks status`
+  in such a repo warns and tells you how to add `guard scan-push` to `.husky/pre-push`.
+- `guard hooks status` shows what is wired. `guard hooks uninstall`, which
+  `guard uninstall` and `install.sh --uninstall` call, restores the previous
+  `core.hooksPath`, or unsets it if there was none.
+
+---
+
 ## Push protection (pre-push hook)
 
 `install.sh` installs a global `pre-push` hook (`hooks/guard-pre-push.sh`) that

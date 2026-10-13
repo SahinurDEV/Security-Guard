@@ -228,6 +228,12 @@ WantedBy=multi-user.target
 }
 
 pub fn run(uninstall: bool) -> Result<u8, String> {
+    if uninstall {
+        // restore the developer's previous core.hooksPath (silent when not wired)
+        if let Err(e) = crate::hooks::uninstall() {
+            eprintln!("guard: hooks: {e}");
+        }
+    }
     let macos = cfg!(target_os = "macos");
     if !uninstall && !macos {
         // Linux/Windows: the service runs as root/SYSTEM out of /var/lib/guard,

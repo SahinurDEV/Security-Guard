@@ -81,6 +81,15 @@ Register-ScheduledTask -TaskName 'GuardWatcher' -Action $action -Trigger @($trig
   -Settings $settings -Principal $principal -Force -Description 'Guard supply-chain watcher (auto-start, keep-alive)' | Out-Null
 Start-ScheduledTask -TaskName 'GuardWatcher'
 
+# --- global git hooks for this user: scan every clone/pull, block infected pushes ---
+# (Git for Windows runs the sh hooks itself; any previous core.hooksPath is saved and chained)
+if (Get-Command git -ErrorAction SilentlyContinue) {
+  & $Bin hooks install
+  if ($LASTEXITCODE -ne 0) { Write-Warning "git hooks not installed; run: guard hooks install" }
+} else {
+  Write-Warning "git not found; after installing Git for Windows run: guard hooks install"
+}
+
 # --- auto-configure Sysmon (Microsoft-signed kernel telemetry) ---
 # Installs Sysmon (or updates its config if already present) using the config
 # bundled inside the Guard binary. Best-effort: Guard works fine without it.
@@ -116,4 +125,5 @@ Install-Sysmon -Bin $Bin -Arch $arch
 
 Write-Host ""
 Write-Host "Done. Guard is installed, trusted in Defender, and the GuardWatcher task is running."
-Write-Host "Open a NEW terminal, then try:  guard version   |   guard scan .   |   guard triage"
+Write-Host "Open a NEW terminal, then try:  guard version   |   guard hooks status   |   guard scan ."
+Write-Host "Uninstall (elevated): guard uninstall   (restores your previous git core.hooksPath)"

@@ -102,6 +102,11 @@ if ($LASTEXITCODE -ne 0) { Fail "$Bin version failed" }
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 if ($machinePath -notlike '*C:\Program Files\Guard*') { Fail 'guard.ps1 did not add Guard to the system PATH' }
 Wait-For 30 'the GuardWatcher task to run' { (Task-State) -eq 'Running' }
+$hp = (& git config --global --get core.hooksPath)
+if (-not $hp -or $hp -notlike '*/.guard/githooks') { Fail "guard.ps1 did not set the global git hooks (core.hooksPath=$hp)" }
+foreach ($h in 'post-checkout','post-merge','post-rewrite','pre-push') {
+  if (-not (Test-Path (Join-Path $env:USERPROFILE ".guard\githooks\$h"))) { Fail "guard.ps1 did not install the $h hook" }
+}
 
 # once the watcher is up, a malicious file dropped in the user's Downloads
 # (the SYSTEM task watches every profile) raises an alert

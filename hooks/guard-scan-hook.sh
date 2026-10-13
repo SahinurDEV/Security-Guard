@@ -28,12 +28,18 @@ if [ -z "$GUARD" ]; then
 fi
 
 # The repo the hook is running in
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || REPO_ROOT=""
 
-# Skip if Guard isn't installed (don't break git for anyone)
-[ -n "$GUARD" ] && [ -x "$GUARD" ] || exit 0
+# Guard not installed: still run the displaced hooks (don't break git for anyone)
+GUARD_OK=1
+[ -n "$GUARD" ] && [ -x "$GUARD" ] || GUARD_OK=0
+[ -n "$REPO_ROOT" ] || GUARD_OK=0
+
+# post-rewrite gets "<old> <new>" lines on stdin; keep them for the chained hook
+[ "$(basename "$0")" = post-rewrite ] && GUARD_CHAIN_STDIN=$(cat)
 
 hook_name=$(basename "$0")
+if [ "$GUARD_OK" = 1 ]; then
 log="$GUARD_HOME/hook.log"
 mkdir -p "$GUARD_HOME" 2>/dev/null || true
 echo "$(date -u +%FT%TZ)  $hook_name  $REPO_ROOT" >> "$log" 2>/dev/null || true
@@ -48,5 +54,31 @@ fi
 if ! "$GUARD" scan "$REPO_ROOT" >/dev/null 2>>"$log"; then
     printf '\033[31m[GUARD] Supply-chain signatures detected in %s — see %s\033[0m\n' "$REPO_ROOT" "$log" >&2
 fi
+fi
 
-exit 0
+# --- chain to the hooks Guard displaced (husky, lefthook, pre-commit, ...) ---
+# 1) the global core.hooksPath that was set before Guard (saved at install),
+# 2) the repo's own .git/hooks/<name> (a global core.hooksPath hides it).
+# A repo whose LOCAL config sets core.hooksPath (husky v9) never reaches this
+# file at all; `guard hooks status` in that repo warns about it.
+guard_chain() {
+    _name=$1; shift
+    _ours=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)
+    _prev=$(cat "$GUARD_HOME/githooks.prev" 2>/dev/null || true)
+    case "$_prev" in "~/"*) _prev="$HOME/${_prev#\~/}" ;; esac
+    _common=$(git rev-parse --git-common-dir 2>/dev/null || true)
+    for _d in "$_prev" "${_common:+$_common/hooks}"; do
+        [ -n "$_d" ] && [ -d "$_d" ] || continue
+        [ "$(cd "$_d" && pwd -P)" = "$_ours" ] && continue
+        [ -x "$_d/$_name" ] || continue
+        if [ -n "${GUARD_CHAIN_STDIN+x}" ]; then
+            printf '%s\n' "$GUARD_CHAIN_STDIN" | "$_d/$_name" "$@" || return $?
+        else
+            "$_d/$_name" "$@" || return $?
+        fi
+    done
+    return 0
+}
+
+# a displaced hook's failure is passed on (git ignores post-* exit codes anyway)
+guard_chain "$(basename "$0")" "$@"

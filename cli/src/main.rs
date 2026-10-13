@@ -6,6 +6,7 @@
 
 mod av;
 mod deps;
+mod hooks;
 mod install;
 mod net;
 mod notify;
@@ -48,6 +49,7 @@ Commands in this build:
   guard notify-test        show a sample threat popup (verify desktop alerts work)
   guard deps update        refresh the malware-package blocklist from GitHub advisories
   guard deps check <path>  check a project's dependencies against the malware blocklist [--blocklist FILE]
+  guard hooks install      global git hooks for every repo (clone/pull scan + pre-push gate); also uninstall|status
   guard install            install Guard as an auto-start service on this machine
   guard uninstall          remove the Guard service + hooks
   guard update             check the signed update channel now (blocklist + binary)
@@ -186,6 +188,7 @@ fn run(args: &[String]) -> u8 {
         },
         "watch" => watch::main(rest),
         "sensor" => sensor::main(rest),
+        "hooks" => hooks::main(rest),
         "install" => report(install::run(false)),
         "uninstall" => report(install::run(true)),
         c => {

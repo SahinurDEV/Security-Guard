@@ -62,6 +62,16 @@ echo "installed: $BIN ($("$BIN" version))"
 echo "Setting up the auto-start service ..."
 "$BIN" install
 
+# global git hooks for the developer (re-runs as $SUDO_USER under sudo):
+# every clone/pull is scanned and infected pushes are blocked
+echo "Installing global git hooks ..."
+if command -v git >/dev/null 2>&1; then
+  "$BIN" hooks install || echo "WARNING: git hooks not installed; run: guard hooks install" >&2
+else
+  echo "WARNING: git not found; after installing git run: guard hooks install" >&2
+fi
+
 echo ""
 echo "Done. Guard is running and will keep itself updated."
-echo "Try:  guard version   |   guard scan .   |   guard triage"
+echo "Try:  guard version   |   guard hooks status   |   guard scan ."
+echo "Uninstall: sudo guard uninstall   (restores your previous git core.hooksPath)"

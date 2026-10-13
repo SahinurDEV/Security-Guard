@@ -36,8 +36,10 @@ uninstall() {
             systemctl --user daemon-reload 2>/dev/null || true
             ;;
     esac
-    # restore previous global hooksPath only if it points at ours
-    if [ "$(git config --global --get core.hooksPath || true)" = "$HOOKS_DIR" ]; then
+    # restore the global core.hooksPath that was set before Guard (or unset ours)
+    if [ -x "$GUARD" ]; then
+        "$GUARD" hooks uninstall || true
+    elif [ "$(git config --global --get core.hooksPath || true)" = "$HOOKS_DIR" ]; then
         git config --global --unset core.hooksPath || true
     fi
     echo "Removed service + global hook wiring. App/config left in $GUARD_HOME (delete manually if desired)."
@@ -47,7 +49,7 @@ uninstall() {
 [ "${1:-}" = "--uninstall" ] && uninstall
 
 echo "==> Installing Guard to $GUARD_HOME"
-mkdir -p "$GUARD_BIN_DIR" "$HOOKS_DIR"
+mkdir -p "$GUARD_BIN_DIR"
 
 # 1. The guard binary
 src_bin="${GUARD_BIN:-$SRC_DIR/cli/target/release/guard}"
@@ -64,20 +66,9 @@ fi
 cp "$src_bin" "$GUARD.tmp" && chmod +x "$GUARD.tmp" && mv -f "$GUARD.tmp" "$GUARD"
 echo "    binary -> $GUARD ($("$GUARD" version))"
 
-# 2. Global git hooks
-for hook in post-checkout post-merge post-rewrite; do
-    cp "$SRC_DIR/hooks/guard-scan-hook.sh" "$HOOKS_DIR/$hook"
-    chmod +x "$HOOKS_DIR/$hook"
-done
-cp "$SRC_DIR/hooks/guard-pre-push.sh" "$HOOKS_DIR/pre-push"
-chmod +x "$HOOKS_DIR/pre-push"
-# Preserve any existing global hooksPath by chaining is out of scope; warn instead.
-existing="$(git config --global --get core.hooksPath || true)"
-if [ -n "$existing" ] && [ "$existing" != "$HOOKS_DIR" ]; then
-    echo "    NOTE: existing core.hooksPath=$existing will be replaced. Chain manually if needed."
-fi
-git config --global core.hooksPath "$HOOKS_DIR"
-echo "    global git hooks -> $HOOKS_DIR (post-checkout/merge/rewrite, pre-push)"
+# 2. Global git hooks (clone/pull scan + pre-push gate). `guard hooks install`
+#    saves any existing global core.hooksPath and chains to it; uninstall restores it.
+"$GUARD" hooks install
 
 # 3. Default watcher config (only if absent — don't clobber local edits)
 if [ ! -f "$GUARD_HOME/watcher.config.json" ]; then
