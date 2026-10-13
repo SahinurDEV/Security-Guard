@@ -60,7 +60,40 @@ installs it, registers the auto-start watcher service, trusts Guard in Microsoft
 Defender, and (Windows) auto-configures Sysmon. Supported targets: `linux-x64`,
 `linux-arm64`, `darwin-arm64`, `windows-x64`, `windows-arm64`.
 
-Uninstall anytime: `sudo guard uninstall` (or `guard uninstall` on Windows).
+It also runs `guard hooks install` for you, the developer: global git hooks that
+scan every clone/pull and block infected pushes (see
+[Global git hooks](#global-git-hooks-all-platforms)). Check with `guard hooks status`.
+
+Prefer to read the script before running it as root?
+```bash
+curl -fsSLo guard.sh https://security.sparktech.agency/guard.sh
+less guard.sh            # it only talks to github.com/Syed-Bipul-Rahman/Security-Guard releases
+sudo bash guard.sh
+```
+
+Uninstall anytime: `sudo guard uninstall` (or `guard uninstall` on Windows). This
+removes the service and the git hooks, and restores your previous `core.hooksPath`.
+
+### What it covers, and what it doesn't
+
+| Threat | Covered by |
+|---|---|
+| Malware arriving with a clone/pull | `post-checkout`/`post-merge` hooks quarantine it (reversible) |
+| Pushing infected code, including force pushes and new branches | `pre-push` hook blocks it |
+| Malware already on disk before install | the watcher's first-start scan |
+| `git push --no-verify`, or a PC without Guard | **not covered on the client.** Use the CI gate below as a required check |
+| A repo with its own `core.hooksPath` (husky v9) | clone scan yes, pre-push no. `guard hooks status` warns |
+| Malware that already ran (stolen tokens, persistence) | `guard triage` helps find it. Rotate credentials either way |
+
+### CI gate (server side)
+
+Copy [`ci/guard-malware-check.yml`](ci/guard-malware-check.yml) to
+`.github/workflows/` and make **Guard malware check** a required status check
+(branch protection or an org ruleset). Also block force pushes on default branches.
+The workflow downloads a **pinned** Guard release from this repo's GitHub Releases,
+verifies a **pinned SHA-256**, and never runs code from the scanned repo. There is
+no `curl | sudo bash` and no third-party domain. Bump `GUARD_VERSION` and
+`GUARD_SHA256` together to upgrade.
 
 ---
 
