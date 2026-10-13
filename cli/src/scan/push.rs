@@ -7,7 +7,9 @@
 //! commits the remote does not have yet - including blobs that a later commit
 //! deletes again, since they would still land in the remote's history - writes
 //! them into a scratch directory (never executed, never checked out), and runs
-//! the regular tree scan over it.
+//! the regular tree scan over it. The full tree of each pushed tip is
+//! scanned as well, so a push onto an already-infected branch is blocked until
+//! the malware is removed in a commit (GUARD_PUSH_SCOPE=new turns that off).
 //!
 //! Exit 0 lets the push through; exit 1 blocks it. On a block the working tree
 //! is cleaned (injected code excised, whole-file droppers quarantined, all
@@ -157,6 +159,20 @@ fn changed_blobs(repo: &Path, commit: &str, out: &mut BTreeSet<(String, String)>
     Ok(())
 }
 
+/// (blob sha, path) for every file in a commit's tree.
+fn tree_blobs(repo: &Path, commit: &str, out: &mut BTreeSet<(String, String)>) -> Result<(), String> {
+    let raw = git(repo, &["ls-tree", "-r", "-z", "--full-tree", commit])?;
+    // "<mode> blob <sha>\t<path>\0"
+    for entry in raw.split('\0').filter(|e| !e.is_empty()) {
+        let Some((meta, path)) = entry.split_once('\t') else { continue };
+        let f: Vec<&str> = meta.split(' ').collect();
+        if f.len() == 3 && f[1] == "blob" {
+            out.insert((f[2].to_string(), path.to_string()));
+        }
+    }
+    Ok(())
+}
+
 /// Write each blob under dir/<path>; a second distinct version of the same
 /// path goes under dir/.guard-rev-N/<path>.
 fn materialize(repo: &Path, blobs: &BTreeSet<(String, String)>, dir: &Path) -> Result<BTreeMap<PathBuf, String>, String> {
@@ -254,6 +270,12 @@ fn check(repo: &Path, refs: &[PushRef], remote: Option<&str>) -> Result<bool, St
         }
         for c in new_commits(repo, r, remote.as_deref())? {
             changed_blobs(repo, &c, &mut blobs)?;
+        }
+        // the tree the remote ends up with, too: pushing on top of a branch
+        // that is already infected is blocked until the infection is
+        // committed away (GUARD_PUSH_SCOPE=new: only what the push adds)
+        if !env_is("GUARD_PUSH_SCOPE", "new") {
+            tree_blobs(repo, &r.local_sha, &mut blobs)?;
         }
     }
     if blobs.is_empty() {

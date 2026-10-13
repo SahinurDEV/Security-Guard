@@ -231,5 +231,31 @@ fn commits_only_on_another_remote_are_scanned() {
     };
     assert_eq!(run("mirror").code, 1);
     assert_eq!(run(&s(&mirror)).code, 1, "push to a bare path scans everything");
-    assert_eq!(run("origin").code, 0, "origin already has these commits");
+    // origin already has those commits, but its tip is still infected
+    assert_eq!(run("origin").code, 1, "pushing onto an infected branch is blocked");
+    let o = guard(&["scan-push", "origin", "url"])
+        .home(&t.join("home"))
+        .cwd(&work)
+        .env("GUARD_PUSH_QUARANTINE", "0")
+        .env("GUARD_PUSH_SCOPE", "new")
+        .stdin(new.as_bytes())
+        .run();
+    assert_eq!(o.code, 0, "scope=new: origin already has these commits");
+}
+
+#[test]
+fn committing_the_cleanup_unblocks_the_push() {
+    let t = Tmp::new("push-cleanup");
+    let (work, _) = setup(&t);
+    commit(&work, "public/fonts/icons.otf", FAKE_FONT, "x");
+    git(&work, &["push", "-q", "--no-verify", "origin", "main"]);
+    let infected = git(&work, &["rev-parse", "HEAD"]);
+    let on_top = commit(&work, "b.txt", "b\n", "work on top");
+    assert_eq!(scan_push(&t, &work, &line(&on_top, &infected)).code, 1);
+    fs::remove_file(work.join("public/fonts/icons.otf")).unwrap();
+    git(&work, &["add", "-A"]);
+    git(&work, &["commit", "-q", "--no-verify", "-m", "remove malware"]);
+    let clean = git(&work, &["rev-parse", "HEAD"]);
+    let o = scan_push(&t, &work, &line(&clean, &infected));
+    assert_eq!(o.code, 0, "{}", o.shown_all());
 }

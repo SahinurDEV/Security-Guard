@@ -306,7 +306,10 @@ are caught too. If it finds malware it **blocks the push** (exit 1). That covers
   is "reachable from the new tip and not from what the remote had", so rewritten
   history is scanned too;
 - new branches and tags (compared against your remote-tracking refs);
-- branch deletions, which push no content and always pass.
+- branch deletions, which push no content and always pass;
+- the **whole tree of the pushed tip**, so pushing more work onto a branch that
+  is already infected is blocked until a commit removes the malware.
+  `GUARD_PUSH_SCOPE=new` scans only what the push adds.
 
 On a block Guard also cleans the working tree (injected code excised,
 whole-file droppers moved to the quarantine, undo with `guard restore <path>`).
