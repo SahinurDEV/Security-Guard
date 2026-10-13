@@ -9,7 +9,7 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
@@ -247,6 +247,10 @@ pub fn run(uninstall: bool) -> Result<u8, String> {
         if uninstall {
             // guard.ps1 registered it; the binary stays, as on Linux and macOS
             call(&["schtasks", "/End", "/TN", "GuardWatcher"])?;
+            // the per-user force-push watchdog; older installs don't have it
+            for args in [&["/End", "/TN", "GuardGitHubWatch"][..], &["/Delete", "/TN", "GuardGitHubWatch", "/F"]] {
+                let _ = Command::new("schtasks").args(args).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            }
             let rc = call(&["schtasks", "/Delete", "/TN", "GuardWatcher", "/F"])?;
             if rc != 0 {
                 eprintln!("guard: could not remove the GuardWatcher task (not installed, or not an elevated prompt)");

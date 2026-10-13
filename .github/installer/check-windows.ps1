@@ -26,6 +26,7 @@ function Wait-For($secs, $what, [scriptblock]$cond) {
   Fail "timed out after ${secs}s waiting for: $what"
 }
 function Task-State { (Get-ScheduledTask -TaskName GuardWatcher -ErrorAction SilentlyContinue).State }
+function GitHub-Task { Get-ScheduledTask -TaskName GuardGitHubWatch -ErrorAction SilentlyContinue }
 
 # --- serve this build the way GitHub Releases serves a release
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
@@ -102,6 +103,12 @@ if ($LASTEXITCODE -ne 0) { Fail "$Bin version failed" }
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 if ($machinePath -notlike '*C:\Program Files\Guard*') { Fail 'guard.ps1 did not add Guard to the system PATH' }
 Wait-For 30 'the GuardWatcher task to run' { (Task-State) -eq 'Running' }
+# the force-push watchdog runs as the user who installed, not SYSTEM, so it
+# can use their git credentials
+$gh = GitHub-Task
+if (-not $gh) { Fail 'guard.ps1 did not register the GuardGitHubWatch task' }
+if ($gh.Principal.UserId -match 'SYSTEM') { Fail 'GuardGitHubWatch runs as SYSTEM, not the user' }
+if ($gh.Actions[0].Arguments -ne 'github watch') { Fail "GuardGitHubWatch runs '$($gh.Actions[0].Arguments)'" }
 
 # once the watcher is up, a malicious file dropped in the user's Downloads
 # (the SYSTEM task watches every profile) raises an alert
@@ -142,6 +149,7 @@ Write-Host "::group::guard uninstall"
 & $Bin uninstall
 if ($LASTEXITCODE -ne 0) { Fail 'guard uninstall failed' }
 if (Task-State) { Fail 'guard uninstall left the GuardWatcher task registered' }
+if (GitHub-Task) { Fail 'guard uninstall left the GuardGitHubWatch task registered' }
 Wait-For 30 'the watcher to stop' { -not (Get-Process -Name guard -ErrorAction SilentlyContinue) }
 Write-Host "::endgroup::"
 Write-Host 'installer OK'

@@ -42,6 +42,8 @@ use crate::scan::DEPS_DIR;
 
 /// Cleared by SIGTERM / SIGINT (Ctrl+C on Windows).
 pub static RUNNING: AtomicBool = AtomicBool::new(true);
+/// Set while a force-push check runs in the background.
+static GITHUB_BUSY: AtomicBool = AtomicBool::new(false);
 
 /// What package managers write when an install finishes.
 const LOCKFILES: &[&str] = &[
@@ -1198,6 +1200,27 @@ impl Watcher {
         }
     }
 
+    /// The force-push watchdog, off the watcher's thread (it talks to the
+    /// network); skipped while the previous pass is still running.
+    fn spawn_github_check(&self) {
+        if GITHUB_BUSY.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let roots = self.roots.clone();
+        let exclude = self.exclude_sorted.clone();
+        let depth = self.max_depth;
+        let home = self.home.clone();
+        let log_path = self.log_path.clone();
+        let notify = self.cfg_truthy("notify", true);
+        std::thread::spawn(move || {
+            let log = |m: &str| log_to(&log_path, m);
+            for r in crate::github::check_all(&roots, &exclude, depth, &home, &log) {
+                crate::github::report(&r, &home, &log, notify);
+            }
+            GITHUB_BUSY.store(false, Ordering::SeqCst);
+        });
+    }
+
     pub fn run(&mut self) {
         install_signal_handlers();
         let roots: Vec<Value> = self
@@ -1252,8 +1275,20 @@ impl Watcher {
         };
         let update_every = num("update_check_sec", 6.0 * 3600.0);
         let full_every = num("full_rescan_sec", 300.0);
+        // Windows: SYSTEM can't use the developer's git credentials, so a
+        // per-user `guard github watch` task does this instead
+        let github_every = if cfg!(windows) {
+            0.0
+        } else {
+            num("github_check_sec", crate::github::DEFAULT_INTERVAL_SEC as f64)
+        };
         let mut last_update = 0.0;
+        let mut last_github = 0.0;
         while RUNNING.load(Ordering::SeqCst) {
+            if github_every > 0.0 && now() - last_github >= github_every {
+                last_github = now();
+                self.spawn_github_check();
+            }
             let pass = if self.native.is_none() {
                 self.poll_once(false).map(|_| ())
             } else {
@@ -1353,7 +1388,7 @@ fn run_hook(cmd: &[Value], path: &str) -> Result<(), String> {
 
 /// Resolves the configured roots. On Windows the service runs as SYSTEM, so a
 /// "~/..." root means that folder under every real user profile.
-fn expand_roots(raw: &[String]) -> Vec<PathBuf> {
+pub(crate) fn expand_roots(raw: &[String]) -> Vec<PathBuf> {
     let mut out = vec![];
     for r in raw {
         if cfg!(windows) && (r == "~" || r.starts_with("~/") || r.starts_with("~\\")) {
