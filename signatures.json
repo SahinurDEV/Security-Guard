@@ -51,8 +51,8 @@
     {"id": "payload.fp.04b12", "severity": "critical", "category": "obfuscated-c2", "value": "__0x04b12=77", "desc": "api.js-wave loader prologue"},
     {"id": "payload.fp.05a598", "severity": "critical", "category": "obfuscated-c2", "value": "_0x05a598a=[", "desc": "api.js-wave base64 chunk array"},
     {"id": "c2.payload.header", "severity": "critical", "category": "c2-stage", "value": "x-payload-b64", "desc": "Stage-2 delivered in an X-Payload-B64 response header"},
-    {"id": "gitignore.autopush", "severity": "high", "category": "infected-host", "value": "temp_auto_push.bat", "desc": "Auto-commit/push script entry left by an infected Windows host", "applies_to": [".gitignore"]},
-    {"id": "gitignore.autopush.2", "severity": "high", "category": "infected-host", "value": "temp_interactive_push.bat", "desc": "Auto-commit/push script entry left by an infected Windows host", "applies_to": [".gitignore"]}
+    {"id": "gitignore.autopush", "severity": "critical", "category": "infected-host", "value": "temp_auto_push.bat", "desc": "Auto-commit/push script entry left by an infected Windows host", "applies_to": [".gitignore"]},
+    {"id": "gitignore.autopush.2", "severity": "critical", "category": "infected-host", "value": "temp_interactive_push.bat", "desc": "Auto-commit/push script entry left by an infected Windows host", "applies_to": [".gitignore"]}
   ],
 
   "regexes": [
@@ -136,7 +136,6 @@
       "desc": "Code hidden after 150+ blanks, pushed off-screen in an editor (any names)"
     },
     {"id": "pkg.script.asset.exec", "severity": "critical", "category": "pkg-script", "applies_to": ["package.json"], "pattern": "\"[^\"\\n]{1,64}\"\\s*:\\s*\"[^\"\\n]*\\bnode\\s+[^\"&|;\\n]*\\.(?:woff2?|ttf|otf|eot|svg|png|jpe?g|gif|ico|bmp|webp)\\b", "desc": "npm script runs a font/image file with node (disguised dropper)"},
-    {"id": "pkg.script.hidden.loader", "severity": "high", "category": "pkg-script", "applies_to": ["package.json"], "pattern": "\"(?:start|dev|serve|build|test|prepare|preinstall|install|postinstall|prestart|predev)\"\\s*:\\s*\"\\s*node\\s+(?:\\./)?[A-Za-z0-9_.-]+\\.(?:js|cjs|mjs)\\s*&&", "desc": "npm lifecycle script runs a root-level JS file before the real command (review it)"},
     {"id": "c2.stage.url", "severity": "critical", "category": "c2-stage", "requires": "/0x/", "pattern": ":(?:80|443)/0x/c?ls\\b", "desc": "Stage-2 URL path of the EtherHiding loader (/0x/cls, /0x/ls)"},
     {"id": "c2.eth.lookup.exec", "severity": "critical", "category": "c2-stage", "flags": "DOTALL", "requires": "spawn", "pattern": "(?:eth\\.blockscout\\.com|1rpc\\.io/eth|eth\\.drpc\\.org|ethereum-rpc\\.publicnode\\.com|eth-mainnet\\.public\\.blastapi\\.io).{0,6000}?\\bspawn\\s*\\(\\s*['\"]node['\"]\\s*,\\s*\\[\\s*['\"]-e['\"]", "desc": "Reads a C2 address from public Ethereum RPCs and runs the fetched code with node -e"}
   ],

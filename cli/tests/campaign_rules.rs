@@ -55,9 +55,14 @@ fn npm_script_runs_a_font() {
 }
 
 #[test]
-fn npm_lifecycle_preloader_is_reported_not_quarantined() {
-    let body = "{\"scripts\": {\"start\": \"node boot.js && node server.js\"}}\n";
-    case("pkg-pre", "package.json", body, "pkg.script.hidden.loader", false);
+fn ordinary_root_build_scripts_are_clean() {
+    // `node build.js && tsc`-style steps are common and legitimate
+    let t = Tmp::new("pkg-legit");
+    let d = t.join("repo");
+    write(&d.join("package.json"), "{\"scripts\": {\"build\": \"node build.js && tsc\", \"start\": \"node boot.js && node server.js\"}}\n");
+    let (code, v) = scan_json(&t, &d);
+    assert_eq!(code, 0, "{v}");
+    assert!(ids(&v).is_empty(), "{:?}", ids(&v));
 }
 
 #[test]
@@ -98,8 +103,8 @@ fn legit_web3_rpc_use_is_clean() {
 }
 
 #[test]
-fn gitignore_autopush_entry_is_reported() {
-    case("gi", ".gitignore", &j(&["node_modules\ntemp_auto", "_push.bat\n"]), "gitignore.autopush", false);
+fn gitignore_autopush_entry_is_flagged() {
+    case("gi", ".gitignore", &j(&["node_modules\ntemp_auto", "_push.bat\n"]), "gitignore.autopush", true);
 }
 
 /// Fail closed: a folder the scan can't read is not reported as clean.

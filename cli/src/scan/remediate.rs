@@ -722,6 +722,29 @@ impl Remediator {
         ))
     }
 
+    /// .gitignore: drop the auto-push script entries an infected host adds.
+    /// Never quarantines the file.
+    fn clean_gitignore(&self, path: &str) -> Result<Value, String> {
+        const BAD: &[&str] = &["temp_auto_push.bat", "temp_interactive_push.bat"];
+        let Ok(text) = py::read_text(Path::new(path)) else {
+            return Ok(json!({"action": "noop", "path": path}));
+        };
+        let is_bad = |l: &str| BAD.contains(&l.trim().trim_start_matches('/'));
+        let n = text.lines().filter(|l| is_bad(l)).count();
+        if n == 0 {
+            return Ok(json!({"action": "noop", "path": path}));
+        }
+        let mut new: String = text.lines().filter(|l| !is_bad(l)).collect::<Vec<_>>().join("\n");
+        if text.ends_with('\n') {
+            new.push('\n');
+        }
+        let (backup, before) = self.backup(path)?;
+        py::write_text(Path::new(path), &new).map_err(|e| pystr::os_error(&e, path))?;
+        self.record("neutralize", path, Some(&backup), json!(before), json!(py::sha256_hex(new.as_bytes())), "removed auto-push entries from .gitignore");
+        self.log(&format!("remediate: removed {n} auto-push entr(y/ies) from {path}"));
+        Ok(json!({"action": "neutralize", "path": path, "blocks": n, "backup": backup.to_string_lossy()}))
+    }
+
     /// package.json: cut a `node <loader> && ` prefix out of npm scripts when
     /// the loader is a disguised asset (font/image) or the campaign's root
     /// api.js. Never quarantines package.json: the project must keep working.
@@ -772,6 +795,9 @@ impl Remediator {
         if name == "package.json" {
             return self.clean_package_json(&path);
         }
+        if name == ".gitignore" {
+            return self.clean_gitignore(&path);
+        }
         if is_dropper {
             return self.quarantine_file(&path, "whole-file dropper / masquerade payload");
         }
@@ -792,7 +818,8 @@ impl Remediator {
     pub fn clean_file(&self, path_arg: &str) -> Result<Value, String> {
         let path = py_path_str(path_arg);
         let parent = pystr::name(&path[..path.len() - pystr::name(&path).len()]).to_lowercase();
-        if parent == ".vscode" || pystr::name(&path).eq_ignore_ascii_case("package.json") {
+        let base = pystr::name(&path).to_lowercase();
+        if parent == ".vscode" || base == "package.json" || base == ".gitignore" {
             return self.remediate_file(&path, false);
         }
         let sig = super::sigs::load(None)?;
@@ -1030,6 +1057,22 @@ mod tests {
         // already clean: nothing to do, and never a quarantine
         assert_eq!(rem.remediate_file(&p, true).unwrap()["action"], "noop");
         assert!(pkg.exists());
+        let _ = fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn gitignore_autopush_entries_are_removed_not_quarantined() {
+        let t = std::env::temp_dir().join(format!("guard-gi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t);
+        fs::create_dir_all(t.join("home")).unwrap();
+        let gi = t.join(".gitignore");
+        let bad = ["temp_auto", "_push.bat"].concat();
+        fs::write(&gi, format!("node_modules\n{bad}\n.env\n")).unwrap();
+        let rem = Remediator::new(&t.join("home"));
+        let p = gi.to_string_lossy().into_owned();
+        assert_eq!(rem.remediate_file(&p, true).unwrap()["action"], "neutralize");
+        assert_eq!(fs::read_to_string(&gi).unwrap(), "node_modules\n.env\n");
+        assert_eq!(rem.remediate_file(&p, true).unwrap()["action"], "noop");
         let _ = fs::remove_dir_all(&t);
     }
 
