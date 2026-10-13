@@ -196,7 +196,7 @@ git clone -q "$repo" "$WORK/bad-clone" 2> "$WORK/clone.err" || { cat "$WORK/clon
 cat "$WORK/clone.err"
 grep -q "\[GUARD\] MALWARE detected" "$WORK/clone.err" || fail "the post-checkout hook raised no warning"
 grep -q "guard restore" "$WORK/clone.err" || fail "no restore hint after quarantine"
-[ ! -e "$WORK/bad-clone/$font" ] || fail "the fake-font dropper was not quarantined on clone"
+grep -q "folder""Open" "$WORK/bad-clone/.vscode/tasks.json" && fail "the folderOpen task was not removed on clone"
 end
 
 step "install.sh: pre-push hook blocks pushing the infected history (normal and --force)"
