@@ -182,7 +182,7 @@ check_preinstalled "" "$HOME/.guard"
 check_watcher "" "$HOME/.guard"
 end
 
-step "install.sh: git hooks warn on a clone with a folderOpen task"
+step "install.sh: git hooks quarantine a clone with a folderOpen task"
 repo="$WORK/bad-repo"
 font="public/fonts/fa-solid-400.wo""ff2"
 mkdir -p "$repo/.vscode" "$repo/public/fonts"
@@ -194,7 +194,9 @@ git -C "$repo" -c user.name=ci -c user.email=ci@example.com add -A
 git -C "$repo" -c user.name=ci -c user.email=ci@example.com commit -qm bad
 git clone -q "$repo" "$WORK/bad-clone" 2> "$WORK/clone.err" || { cat "$WORK/clone.err"; fail "the hook broke git clone"; }
 cat "$WORK/clone.err"
-grep -q "\[GUARD\] WARNING" "$WORK/clone.err" || fail "the post-checkout hook raised no warning"
+grep -q "\[GUARD\] MALWARE detected" "$WORK/clone.err" || fail "the post-checkout hook raised no warning"
+grep -q "guard restore" "$WORK/clone.err" || fail "no restore hint after quarantine"
+[ ! -e "$WORK/bad-clone/$font" ] || fail "the fake-font dropper was not quarantined on clone"
 end
 
 step "install.sh: pre-push hook blocks pushing the infected history (normal and --force)"

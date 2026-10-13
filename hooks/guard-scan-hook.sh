@@ -4,7 +4,8 @@
 # BEFORE the developer opens the folder in an editor.
 #
 # Installed as a global git hook (core.hooksPath) so it fires for EVERY repo,
-# including freshly cloned ones. Detect + report only; it never edits your repo.
+# including freshly cloned ones. On malware it quarantines the infected files
+# (reversible) unless guard.onClone=warn.
 #
 # Wired to: post-checkout, post-merge, post-rewrite  (git has no post-clone, but
 # a clone runs a post-checkout, so clones are covered).
@@ -49,16 +50,10 @@ log="$GUARD_HOME/hook.log"
 mkdir -p "$GUARD_HOME" 2>/dev/null || true
 echo "$(date -u +%FT%TZ)  $hook_name  $REPO_ROOT" >> "$log" 2>/dev/null || true
 
-# 1) Highest-priority: is it safe to open in VS Code?
-if ! "$GUARD" open "$REPO_ROOT" >/dev/null 2>>"$log"; then
-    printf '\n\033[31m[GUARD] WARNING: %s contains a VS Code auto-run task (folderOpen dropper).\n' "$REPO_ROOT" >&2
-    printf '[GUARD] DO NOT OPEN THIS FOLDER IN VS CODE. Details: %s\033[0m\n\n' "$log" >&2
-fi
-
-# 2) Full tree scan (records alerts to the agent; prints a short notice on hit)
-if ! "$GUARD" scan "$REPO_ROOT" >/dev/null 2>>"$log"; then
-    printf '\033[31m[GUARD] Supply-chain signatures detected in %s — see %s\033[0m\n' "$REPO_ROOT" "$log" >&2
-fi
+# Scan what arrived (a clone: the whole tree; a checkout/pull: just the
+# changed files) and, on a hit, quarantine it - reversible with
+# `guard restore <path>`. Warn-only: git config --global guard.onClone warn
+"$GUARD" scan-checkout "$hook_name" "$@" >>"$log"
 fi
 
 # --- chain to the hooks Guard displaced (husky, lefthook, pre-commit, ...) ---

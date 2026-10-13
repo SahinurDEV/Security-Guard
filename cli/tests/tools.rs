@@ -611,12 +611,14 @@ fn git_hook_runs_the_binary() {
         if fixture == "clean-repo" {
             assert_eq!(stderr, "");
         } else {
-            assert!(stderr.contains("DO NOT OPEN THIS FOLDER IN VS CODE"));
-            assert!(stderr.contains("Supply-chain signatures detected"));
+            // quarantined on arrival, with the way back
+            assert!(stderr.contains("MALWARE detected"), "{stderr}");
+            assert!(stderr.contains("guard restore"), "{stderr}");
         }
         let n = Norm::new()
             .path(&tmp.path, "TMP")
-            .re(r"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  ", "<ts>  ");
+            .re(r"(?m)^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ  ", "<ts>  ")
+            .re(r"\d{8}T\d{6}Z_\S*\.bak", "<backup>");
         golden(
             SUITE,
             &format!("git_hook-{fixture}"),
