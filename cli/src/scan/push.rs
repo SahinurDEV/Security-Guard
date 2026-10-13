@@ -292,12 +292,14 @@ fn check(repo: &Path, refs: &[PushRef], remote: Option<&str>) -> Result<bool, St
 }
 
 pub fn main(rest: &[String]) -> u8 {
+    // read stdin first, always: git (or a chained hook) is writing to us
+    let mut input = String::new();
+    let read = std::io::stdin().read_to_string(&mut input);
     if env_is("GUARD_PUSH", "off") {
         banner("GUARD_PUSH=off: pre-push scan skipped");
         return 0;
     }
-    let mut input = String::new();
-    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+    if let Err(e) = read {
         eprintln!("guard scan-push: cannot read stdin: {e}");
         return 1;
     }
