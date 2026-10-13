@@ -13,12 +13,21 @@ use common::*;
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const FAKE_FONT: &str = "module.exports = function () { return 0; };\n";
 
+/// An empty global git config (Windows has no /dev/null for git to read).
+fn empty_gitconfig() -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("guard-it-empty-gitconfig-{}", std::process::id()));
+    if !p.exists() {
+        let _ = fs::write(&p, "");
+    }
+    p
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let o = Command::new("git")
         .current_dir(dir)
         .args(args)
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", if WINDOWS { "NUL" } else { "/dev/null" })
+        .env("GIT_CONFIG_GLOBAL", empty_gitconfig())
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
         .env("GIT_COMMITTER_NAME", "t")
@@ -193,7 +202,7 @@ fn hook_blocks_git_push_and_force_push() {
             .current_dir(&work)
             .args(&args)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", empty_gitconfig())
             .env("GUARD_BIN", bin())
             .env("GUARD_HOME", t.join("home"))
             .env("GUARD_PUSH_QUARANTINE", "0")
