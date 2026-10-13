@@ -81,9 +81,11 @@ fn clone_quarantines_by_default() {
     assert!(o.stderr.contains("guard restore"), "{}", o.stderr);
     assert!(!r.join("public/fonts/icons.otf").exists(), "quarantined");
     // and it can be put back
-    let back = guard(&["restore", &s(&r.join("public/fonts/icons.otf"))]).home(&t.join("home")).run();
+    // native separators, as the quarantine recorded the path
+    let font = r.join("public").join("fonts").join("icons.otf");
+    let back = guard(&["restore", &s(&font)]).home(&t.join("home")).run();
     assert_eq!(back.code, 0, "{}", back.shown_all());
-    assert!(r.join("public/fonts/icons.otf").exists());
+    assert!(font.exists(), "{}", back.shown_all());
 }
 
 #[test]
