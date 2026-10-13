@@ -255,6 +255,8 @@ fn print_human(results: &Value, git: Option<&Value>) {
         "\n{}",
         if infected {
             "RESULT: INFECTED (critical findings present)"
+        } else if results["incomplete"] == json!(true) {
+            "RESULT: INCOMPLETE (unreadable paths - not verified clean)"
         } else {
             "RESULT: clean"
         }
@@ -307,6 +309,8 @@ fn scanner_main(argv: &[String]) -> Result<u8, String> {
     }
     Ok(if infected(&results, git.as_ref()) {
         1
+    } else if results["incomplete"] == json!(true) {
+        3 // fail closed: not verified clean
     } else {
         0
     })

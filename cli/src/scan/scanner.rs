@@ -182,6 +182,7 @@ impl Scanner {
         // dependencies alone pass it).
         let root_is_deps = pystr::name(repo.trim_end_matches(['/', '\\'])) == DEPS_DIR;
         let mut seen = 0usize;
+        let mut incomplete = false;
         let mut stack: Vec<String> = vec![String::new()];
         'walk: while let Some(rel_dir) = stack.pop() {
             let dir = if rel_dir.is_empty() {
@@ -190,6 +191,17 @@ impl Scanner {
                 py::join(&repo, &rel_dir)
             };
             let Some((dirs, files)) = listdir(Path::new(&dir)) else {
+                // fail closed: a folder that exists but can't be read is not
+                // "clean" (a missing path or a plain file is just nothing to walk)
+                if !Path::new(&dir).is_dir() {
+                    continue;
+                }
+                incomplete = true;
+                buckets[2].1.push(json!({
+                    "where": if rel_dir.is_empty() { repo.clone() } else { rel_dir.clone() },
+                    "sig_id": "scan.unreadable", "severity": "high", "category": "scanner",
+                    "desc": "directory could not be read - scan incomplete, NOT verified clean",
+                }));
                 continue;
             };
             let in_deps = root_is_deps || rel_dir.split('/').any(|c| c == DEPS_DIR);
@@ -273,6 +285,9 @@ impl Scanner {
             out.insert(k.into(), Value::Array(v));
         }
         out.insert("infected".into(), json!(infected));
+        if incomplete {
+            out.insert("incomplete".into(), json!(true));
+        }
         Value::Object(out)
     }
 
