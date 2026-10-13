@@ -63,11 +63,17 @@ pub fn trusted(repo: &Path) -> Option<String> {
     for line in list.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         let by_url = github_slug(line).is_some_and(|s| urls.iter().any(|u| github_slug(u).as_deref() == Some(s.as_str())))
             || urls.iter().any(|u| u.trim() == line);
-        if by_url || (!here.is_empty() && norm_path(line) == here) {
+        if by_url || (!here.is_empty() && listed_path(line) == here) {
             return Some(format!("listed in ~/.guard/trusted-repos ({line})"));
         }
     }
     None
+}
+
+/// Canonicalize a listed path (Windows: `\\?\` prefix, 8.3 names) so it
+/// compares equal to the canonical work tree.
+fn listed_path(line: &str) -> String {
+    std::fs::canonicalize(line).map_or_else(|_| norm_path(line), |p| norm_path(&p.to_string_lossy()))
 }
 
 #[cfg(test)]
