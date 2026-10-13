@@ -4,7 +4,7 @@
 #   * copies the guard binary into $GUARD_HOME/bin (from $GUARD_BIN, a cargo
 #     build in cli/target/release, or a fresh `cargo build --release`)
 #   * installs GLOBAL git hooks (post-checkout/merge/rewrite) so every clone/pull
-#     is scanned before you open it
+#     is scanned before you open it, and pre-push so infected pushes are blocked
 #   * installs + starts the always-on watcher service (launchd / systemd)
 #
 # Run this ON EACH developer machine. It is idempotent. Detect+report only.
@@ -69,13 +69,15 @@ for hook in post-checkout post-merge post-rewrite; do
     cp "$SRC_DIR/hooks/guard-scan-hook.sh" "$HOOKS_DIR/$hook"
     chmod +x "$HOOKS_DIR/$hook"
 done
+cp "$SRC_DIR/hooks/guard-pre-push.sh" "$HOOKS_DIR/pre-push"
+chmod +x "$HOOKS_DIR/pre-push"
 # Preserve any existing global hooksPath by chaining is out of scope; warn instead.
 existing="$(git config --global --get core.hooksPath || true)"
 if [ -n "$existing" ] && [ "$existing" != "$HOOKS_DIR" ]; then
     echo "    NOTE: existing core.hooksPath=$existing will be replaced. Chain manually if needed."
 fi
 git config --global core.hooksPath "$HOOKS_DIR"
-echo "    global git hooks -> $HOOKS_DIR (post-checkout/merge/rewrite)"
+echo "    global git hooks -> $HOOKS_DIR (post-checkout/merge/rewrite, pre-push)"
 
 # 3. Default watcher config (only if absent — don't clobber local edits)
 if [ ! -f "$GUARD_HOME/watcher.config.json" ]; then

@@ -295,6 +295,35 @@ the release workflow refuses to build if it fails.
 
 ---
 
+## Push protection (pre-push hook)
+
+`install.sh` installs a global `pre-push` hook (`hooks/guard-pre-push.sh`) that
+runs `guard scan-push`. For every ref being pushed it scans each file the
+push adds or changes, in every new commit, so files deleted again before the push
+are caught too. If it finds malware it **blocks the push** (exit 1). That covers:
+
+- normal pushes and **force pushes** (`--force`, `--force-with-lease`): the range
+  is "reachable from the new tip and not from what the remote had", so rewritten
+  history is scanned too;
+- new branches and tags (compared against your remote-tracking refs);
+- branch deletions, which push no content and always pass.
+
+On a block Guard also cleans the working tree (injected code excised,
+whole-file droppers moved to the quarantine, undo with `guard restore <path>`).
+Set `GUARD_PUSH_QUARANTINE=0` to block without touching files. The pushed
+content is copied out of git objects into a temp dir and scanned there. Nothing
+is checked out or executed. If git can't work out what is being pushed, the push
+is blocked (fail closed; `GUARD_PUSH_FAIL_OPEN=1` overrides for one push).
+`GUARD_PUSH=off git push` skips the scan for one command and prints that it did.
+
+**Bypass:** `git push --no-verify` makes git skip *all* client-side pre-push
+hooks, and a machine without Guard has no hook. A client hook is a seat belt,
+not a wall. For a gate that can't be skipped, add server-side protection:
+the CI check in `ci/guard-malware-check.yml` as a required status check, and a
+GitHub (org) ruleset that blocks force pushes to default branches.
+
+---
+
 ## Contributing
 
 Contributions are welcome — especially new detection signatures.

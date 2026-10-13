@@ -39,6 +39,7 @@ guard - supply-chain and malware protection, one command: `guard <cmd>`.
 Commands in this build:
   guard scan <path>        full repo/tree scan (fingerprints, droppers, vscode, workflows, malware deps)
   guard scan-git <path>    scan working tree AND every added line across git history
+  guard scan-push          pre-push gate: scan what a push sends, block it on malware (git hook)
   guard open <path>        pre-open check: safe to open this folder in VS Code?
   guard clean <path>       REMOVE injected malware: excise bad code, keep the real file (backs up first)
   guard restore <path>     undo a clean/quarantine from the backup store
@@ -168,6 +169,7 @@ fn run(args: &[String]) -> u8 {
         "av" => av::main(rest),
         "scan" => scan::main("scan-tree", rest),
         "scan-git" => scan::main("scan-git", rest),
+        "scan-push" => scan::push::main(rest),
         "open" => scan::main("guard-open", rest),
         "clean" | "restore" => scan::remediate_main(cmd, rest),
         "deps" => report(deps::main(rest)),

@@ -7,6 +7,7 @@
 mod depbl;
 mod fingerprint;
 mod magic;
+pub mod push;
 pub(crate) mod py;
 pub mod remediate;
 pub(crate) mod scanner;
