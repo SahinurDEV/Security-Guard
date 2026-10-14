@@ -176,7 +176,10 @@ Write-Host "::group::guard uninstall"
 if ($LASTEXITCODE -ne 0) { Fail 'guard uninstall failed' }
 if (Task-State) { Fail 'guard uninstall left the GuardWatcher task registered' }
 if (GitHub-Task) { Fail 'guard uninstall left the GuardGitHubWatch task registered' }
-if (git config --global --get core.hooksPath) { Fail 'guard uninstall left core.hooksPath set' }
+# git exits 1 for a missing key: that is the pass, and must not become this script's exit code
+$left = git config --global --get core.hooksPath
+$global:LASTEXITCODE = 0
+if ($left) { Fail "guard uninstall left core.hooksPath set ($left)" }
 Wait-For 30 'the watcher to stop' { -not (Get-Process -Name guard -ErrorAction SilentlyContinue) }
 Write-Host "::endgroup::"
 Write-Host 'installer OK'
