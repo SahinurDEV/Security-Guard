@@ -6,6 +6,7 @@
 
 mod av;
 mod deps;
+mod github;
 mod install;
 mod net;
 mod notify;
@@ -55,6 +56,7 @@ Commands in this build:
   guard av scan <path>     antivirus engine: hash DB + YARA-style rules + heuristics + archives
   guard av quarantine ...  list / restore / delete items in the neutered quarantine vault
   guard watch              start the always-on filesystem watcher (the service runs this)
+  guard github check       find force pushes on main/master/default branches of local repos, undo them
   guard sensor             Windows sensor: Sysmon + reboot events -> alerts (--selftest runs anywhere)
 ";
 
@@ -184,6 +186,7 @@ fn run(args: &[String]) -> u8 {
         },
         "watch" => watch::main(rest),
         "sensor" => sensor::main(rest),
+        "github" => github::main(rest),
         "install" => report(install::run(false)),
         "uninstall" => report(install::run(true)),
         c => {

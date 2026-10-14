@@ -122,6 +122,7 @@ Uninstall anytime: `sudo guard uninstall` (or `guard uninstall` on Windows).
 | `guard clean <path>` | **remove** injected malware in place (excise/quarantine), backing up first |
 | `guard restore <path>` | undo a clean/quarantine from the backup store |
 | `guard watch` | the always-on filesystem watcher (what the service runs) |
+| `guard github check [ROOT...]` | find force pushes on `main` / `master` / the default branch of local repos and put them back (the service does this every 5 minutes) |
 | `guard triage` | host IR triage (reboots / persistence / recon / flood) |
 | `guard sensor` | Windows endpoint sensor: Sysmon + reboot events to alerts (`--selftest` runs anywhere) |
 | `guard permissions [request]` | check disk access; on macOS raise the "Allow" prompts |
@@ -185,6 +186,43 @@ looks clean. So Guard fixes the **working tree by content**, never git history:
   (`C:\Windows`, `/usr`, `/System`, ...) are reported but never removed.
 - After cleaning, commit the fix forward: `git add -A && git commit -m "remove injected payload"`.
   (Don't reset/cherry-pick — the forged history can't be trusted.)
+
+---
+
+## Force-push watchdog
+
+The attack ends with a force push: the attacker amends a commit and rewrites
+`main` with a stolen token. GitHub rulesets and branch protection block that, but
+on GitHub Free they only work on public repositories. So Guard undoes it from the
+developer's machine:
+
+- Every 5 minutes, for each git repository under the watched folders, Guard asks
+  each remote where `main`, `master` and its default branch point. A new tip that
+  contains the last one is a normal push and becomes the new trusted tip.
+- A tip that doesn't contain the last one is a force push. Guard keeps the
+  rewritten commits under `refs/guard/rewritten/...` in the local repo, puts the
+  branch back to the last trusted tip with `git push --force-with-lease` (so it
+  never overwrites a push it hasn't seen), and raises a "Force push undone" alert.
+- It uses the developer's own git credentials, never a token of its own: on Linux
+  the root service runs git as the repository's owner, on macOS it runs as the
+  user, and on Windows `guard.ps1` registers a per-user `GuardGitHubWatch` task.
+- `guard github check [ROOT...]` runs one pass by hand; `"github_check_sec"` in
+  `watcher.config.json` changes the interval (`0` turns the periodic pass off).
+
+Limits:
+
+- Only `main`, `master` and the default branch are watched. Feature and PR branches
+  are rebased and force-pushed all the time, so they are left alone.
+- A deliberate rewrite of `main` is undone too. Push it from a machine without
+  Guard, or keep the rewrite on a new branch and merge it.
+- A force push seen more than 72 hours after the last good check is reported, not
+  rolled back, so a laptop that was off for a week doesn't undo work it never saw.
+- If the restore push is refused (a protected branch, no write access), Guard
+  alerts once and keeps retrying quietly.
+- With a stolen token the attacker can force-push again. Guard undoes each one
+  it sees, but the fix is to revoke the token (`gh auth refresh`, new SSH keys,
+  GitHub's sessions page) and clean the machine. Where rulesets are available,
+  add one on `main` that blocks force pushes.
 
 ---
 

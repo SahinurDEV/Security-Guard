@@ -7,6 +7,8 @@ mod memguard;
 mod store;
 mod watcher;
 
+pub(crate) use watcher::expand_roots;
+
 use std::path::Path;
 
 use serde_json::{json, Map, Value};
@@ -82,6 +84,12 @@ fn load_config(home: &Path) -> Result<Map<String, Value>, String> {
         Ok(_) => Err(format!("{}: not a JSON object", path.display())),
         Err(_) => Ok(cfg),
     }
+}
+
+/// The watcher config in `home` over the defaults (the defaults alone when it
+/// can't be read).
+pub(crate) fn config(home: &Path) -> Map<String, Value> {
+    load_config(home).unwrap_or_else(|_| default_config())
 }
 
 /// Python's float() of a string: surrounding whitespace, `_` between digits,

@@ -57,6 +57,7 @@ Write-Host "checksum OK"
 # stop any running instance so guard.exe isn't locked (a reinstall over a running
 # service would otherwise fail to overwrite the binary)
 Stop-ScheduledTask -TaskName 'GuardWatcher' -ErrorAction SilentlyContinue | Out-Null
+Stop-ScheduledTask -TaskName 'GuardGitHubWatch' -ErrorAction SilentlyContinue | Out-Null
 Get-Process -Name guard -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 if (Test-Path $Bin) { Remove-Item $Bin -Force -ErrorAction SilentlyContinue }
@@ -80,6 +81,22 @@ $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccou
 Register-ScheduledTask -TaskName 'GuardWatcher' -Action $action -Trigger @($trigStart,$trigLogon) `
   -Settings $settings -Principal $principal -Force -Description 'Guard supply-chain watcher (auto-start, keep-alive)' | Out-Null
 Start-ScheduledTask -TaskName 'GuardWatcher'
+
+# force-push watchdog: `guard github watch` as the signed-in user, since it
+# fetches and pushes with that user's git credentials (SYSTEM has none). It
+# checks main/master/default branches of the repos under the watched folders
+# and puts a force-pushed branch back. Interactive logon: it runs while the
+# user is signed in, like their own git would.
+$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$ghAction    = New-ScheduledTaskAction -Execute $Bin -Argument 'github watch'
+$ghTrigger   = New-ScheduledTaskTrigger -AtLogOn -User $me
+$ghSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+                -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
+$ghPrincipal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName 'GuardGitHubWatch' -Action $ghAction -Trigger $ghTrigger `
+  -Settings $ghSettings -Principal $ghPrincipal -Force -Description 'Guard force-push watchdog (undoes force pushes on main/master)' | Out-Null
+Start-ScheduledTask -TaskName 'GuardGitHubWatch' -ErrorAction SilentlyContinue
 
 # --- auto-configure Sysmon (Microsoft-signed kernel telemetry) ---
 # Installs Sysmon (or updates its config if already present) using the config
