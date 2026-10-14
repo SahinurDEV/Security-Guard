@@ -722,6 +722,60 @@ impl Remediator {
         ))
     }
 
+    /// .gitignore: drop the auto-push script entries an infected host adds.
+    /// Never quarantines the file.
+    fn clean_gitignore(&self, path: &str) -> Result<Value, String> {
+        const BAD: &[&str] = &["temp_auto_push.bat", "temp_interactive_push.bat"];
+        // byte-level: keep the file's own line endings (LF or CRLF) exactly
+        let Ok(raw) = std::fs::read(path) else {
+            return Ok(json!({"action": "noop", "path": path}));
+        };
+        let is_bad = |l: &[u8]| {
+            let l = String::from_utf8_lossy(l);
+            BAD.contains(&l.trim().trim_start_matches('/'))
+        };
+        let lines: Vec<&[u8]> = raw.split_inclusive(|&c| c == b'\n').collect();
+        let n = lines.iter().filter(|l| is_bad(l)).count();
+        if n == 0 {
+            return Ok(json!({"action": "noop", "path": path}));
+        }
+        let new: Vec<u8> = lines.into_iter().filter(|l| !is_bad(l)).flatten().copied().collect();
+        let (backup, before) = self.backup(path)?;
+        std::fs::write(path, &new).map_err(|e| pystr::os_error(&e, path))?;
+        self.record("neutralize", path, Some(&backup), json!(before), json!(py::sha256_hex(&new)), "removed auto-push entries from .gitignore");
+        self.log(&format!("remediate: removed {n} auto-push entr(y/ies) from {path}"));
+        Ok(json!({"action": "neutralize", "path": path, "blocks": n, "backup": backup.to_string_lossy()}))
+    }
+
+    /// package.json: cut a `node <loader> && ` prefix out of npm scripts when
+    /// the loader is a disguised asset (font/image) or the campaign's root
+    /// api.js. Never quarantines package.json: the project must keep working.
+    fn clean_package_json(&self, path: &str) -> Result<Value, String> {
+        static HIJACK: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"("[^"\n]{1,64}"\s*:\s*")\s*node\s+(?:\./)?(?:api\.js|[^"&|;\s]*\.(?:woff2?|ttf|otf|eot|svg|png|jpe?g|gif|ico|bmp|webp))\s*&&\s*"#).unwrap()
+        });
+        let Ok(text) = py::read_text(Path::new(path)) else {
+            return Ok(json!({"action": "noop", "path": path}));
+        };
+        let n = HIJACK.find_iter(&text).count();
+        if n == 0 {
+            return Ok(json!({"action": "noop", "path": path}));
+        }
+        let new = HIJACK.replace_all(&text, "$1").into_owned();
+        let (backup, before) = self.backup(path)?;
+        py::write_text(Path::new(path), &new).map_err(|e| pystr::os_error(&e, path))?;
+        self.record(
+            "neutralize",
+            path,
+            Some(&backup),
+            json!(before),
+            json!(py::sha256_hex(new.as_bytes())),
+            "removed hidden loader from npm scripts",
+        );
+        self.log(&format!("remediate: removed {n} hidden loader call(s) from npm scripts in {path}"));
+        Ok(json!({"action": "neutralize", "path": path, "blocks": n, "backup": backup.to_string_lossy()}))
+    }
+
     pub fn remediate_file(&self, path_arg: &str, is_dropper: bool) -> Result<Value, String> {
         let path = py_path_str(path_arg);
         let p = Path::new(&path);
@@ -739,6 +793,12 @@ impl Remediator {
             return Ok(self
                 .clean_vscode_tasks(&path)?
                 .unwrap_or_else(|| json!({"action": "noop", "path": path})));
+        }
+        if name == "package.json" {
+            return self.clean_package_json(&path);
+        }
+        if name == ".gitignore" {
+            return self.clean_gitignore(&path);
         }
         if is_dropper {
             return self.quarantine_file(&path, "whole-file dropper / masquerade payload");
@@ -760,7 +820,8 @@ impl Remediator {
     pub fn clean_file(&self, path_arg: &str) -> Result<Value, String> {
         let path = py_path_str(path_arg);
         let parent = pystr::name(&path[..path.len() - pystr::name(&path).len()]).to_lowercase();
-        if parent == ".vscode" {
+        let base = pystr::name(&path).to_lowercase();
+        if parent == ".vscode" || base == "package.json" || base == ".gitignore" {
             return self.remediate_file(&path, false);
         }
         let sig = super::sigs::load(None)?;
@@ -976,6 +1037,49 @@ mod tests {
     use super::*;
 
     const INFECTED: &str = "import x from 'y';\n\n(async () => {\n  const u = atob(process.env.AUTH_API_KEY);\n  const r = await fetch(u); eval(proxyInfo);\n})();\n\nexport default { a: \"(\" };\n";
+
+    #[test]
+    fn package_json_hidden_loader_is_cut_not_quarantined() {
+        let t = std::env::temp_dir().join(format!("guard-pkg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t);
+        fs::create_dir_all(t.join("home")).unwrap();
+        let pkg = t.join("package.json");
+        let api = ["node api", ".js && next dev"].concat();
+        let font = ["node ./public/fonts/x", ".otf && nodemon src/index.js"].concat();
+        fs::write(&pkg, format!("{{\n  \"scripts\": {{\n    \"dev\": \"{api}\",\n    \"start\": \"{font}\",\n    \"build\": \"node build.js && tsc\"\n  }}\n}}\n")).unwrap();
+        let rem = Remediator::new(&t.join("home"));
+        let p = pkg.to_string_lossy().into_owned();
+        let r = rem.remediate_file(&p, true).unwrap();
+        assert_eq!(r["action"], "neutralize");
+        assert_eq!(r["blocks"], 2);
+        let after = fs::read_to_string(&pkg).unwrap();
+        assert!(after.contains("\"dev\": \"next dev\""), "{after}");
+        assert!(after.contains("\"start\": \"nodemon src/index.js\""), "{after}");
+        assert!(after.contains("node build.js && tsc"), "a legit build step stays: {after}");
+        // already clean: nothing to do, and never a quarantine
+        assert_eq!(rem.remediate_file(&p, true).unwrap()["action"], "noop");
+        assert!(pkg.exists());
+        let _ = fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn gitignore_autopush_entries_are_removed_not_quarantined() {
+        let bad = ["temp_auto", "_push.bat"].concat();
+        // LF stays LF, CRLF stays CRLF, byte for byte, on every OS
+        for (tag, eol) in [("lf", "\n"), ("crlf", "\r\n")] {
+            let t = std::env::temp_dir().join(format!("guard-gi-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&t);
+            fs::create_dir_all(t.join("home")).unwrap();
+            let gi = t.join(".gitignore");
+            fs::write(&gi, ["node_modules", &bad, ".env", ""].join(eol)).unwrap();
+            let rem = Remediator::new(&t.join("home"));
+            let p = gi.to_string_lossy().into_owned();
+            assert_eq!(rem.remediate_file(&p, true).unwrap()["action"], "neutralize", "{tag}");
+            assert_eq!(fs::read(&gi).unwrap(), ["node_modules", ".env", ""].join(eol).into_bytes(), "{tag}");
+            assert_eq!(rem.remediate_file(&p, true).unwrap()["action"], "noop", "{tag}");
+            let _ = fs::remove_dir_all(&t);
+        }
+    }
 
     #[test]
     fn excises_the_iife_only() {

@@ -294,7 +294,10 @@ fn check(repo: &Path, refs: &[PushRef], remote: Option<&str>, trusted: bool) -> 
     let result = (|| {
         materialize(repo, &blobs, &dir)?;
         let d = dir.to_string_lossy().into_owned();
-        super::scanner_main(&["scan-tree".to_string(), d]).map(|code| code == 1)
+        super::scanner_main(&["scan-tree".to_string(), d]).and_then(|code| match code {
+            3 => Err("scan incomplete (unreadable files)".to_string()),
+            c => Ok(c == 1),
+        })
     })();
     let _ = fs::remove_dir_all(&dir);
     result
