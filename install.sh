@@ -3,8 +3,8 @@
 #
 #   * copies the guard binary into $GUARD_HOME/bin (from $GUARD_BIN, a cargo
 #     build in cli/target/release, or a fresh `cargo build --release`)
-#   * installs GLOBAL git hooks (post-checkout/merge/rewrite) so every clone/pull
-#     is scanned before you open it
+#   * installs GLOBAL git hooks: pre-push blocks a push that carries malware,
+#     post-checkout/merge/rewrite scan every clone and pull before you open it
 #   * installs + starts the always-on watcher service (launchd / systemd)
 #
 # Run this ON EACH developer machine. It is idempotent. Detect+report only.
@@ -36,8 +36,10 @@ uninstall() {
             systemctl --user daemon-reload 2>/dev/null || true
             ;;
     esac
-    # restore previous global hooksPath only if it points at ours
-    if [ "$(git config --global --get core.hooksPath || true)" = "$HOOKS_DIR" ]; then
+    # puts back a core.hooksPath set before Guard's, and only touches ours
+    if [ -x "$GUARD" ]; then
+        GUARD_HOME="$GUARD_HOME" "$GUARD" hooks uninstall >/dev/null || true
+    elif [ "$(git config --global --get core.hooksPath || true)" = "$HOOKS_DIR" ]; then
         git config --global --unset core.hooksPath || true
     fi
     echo "Removed service + global hook wiring. App/config left in $GUARD_HOME (delete manually if desired)."
@@ -47,7 +49,7 @@ uninstall() {
 [ "${1:-}" = "--uninstall" ] && uninstall
 
 echo "==> Installing Guard to $GUARD_HOME"
-mkdir -p "$GUARD_BIN_DIR" "$HOOKS_DIR"
+mkdir -p "$GUARD_BIN_DIR"
 
 # 1. The guard binary
 src_bin="${GUARD_BIN:-$SRC_DIR/cli/target/release/guard}"
@@ -64,18 +66,10 @@ fi
 cp "$src_bin" "$GUARD.tmp" && chmod +x "$GUARD.tmp" && mv -f "$GUARD.tmp" "$GUARD"
 echo "    binary -> $GUARD ($("$GUARD" version))"
 
-# 2. Global git hooks
-for hook in post-checkout post-merge post-rewrite; do
-    cp "$SRC_DIR/hooks/guard-scan-hook.sh" "$HOOKS_DIR/$hook"
-    chmod +x "$HOOKS_DIR/$hook"
-done
-# Preserve any existing global hooksPath by chaining is out of scope; warn instead.
-existing="$(git config --global --get core.hooksPath || true)"
-if [ -n "$existing" ] && [ "$existing" != "$HOOKS_DIR" ]; then
-    echo "    NOTE: existing core.hooksPath=$existing will be replaced. Chain manually if needed."
-fi
-git config --global core.hooksPath "$HOOKS_DIR"
-echo "    global git hooks -> $HOOKS_DIR (post-checkout/merge/rewrite)"
+# 2. Global git hooks: pre-push blocks infected pushes, post-checkout/merge/
+#    rewrite scan every clone and pull. Hooks from an earlier core.hooksPath
+#    and each repo's own .git/hooks keep running after Guard's.
+GUARD_HOME="$GUARD_HOME" "$GUARD" hooks install | sed 's/^guard: /    /'
 
 # 3. Default watcher config (only if absent — don't clobber local edits)
 if [ ! -f "$GUARD_HOME/watcher.config.json" ]; then

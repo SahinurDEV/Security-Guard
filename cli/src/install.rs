@@ -227,8 +227,30 @@ WantedBy=multi-user.target
     Ok(if rc == 0 { 0 } else { (rc & 0xff) as u8 })
 }
 
+/// Take the installing user's global git hooks out too (`guard hooks
+/// uninstall`, as that user: the hooks and git config are theirs).
+fn remove_git_hooks() {
+    if std::env::var_os("GUARD_INSTALL_PREFIX").is_some() {
+        return; // tests: never touch the real git config
+    }
+    let exe = self_exe();
+    let mut c = match sudo_user().filter(|u| u != "root") {
+        #[cfg(unix)]
+        Some(user) if unsafe { libc::geteuid() } == 0 => {
+            let mut c = Command::new("sudo");
+            c.args(["-u", &user, "-H", &exe]);
+            c
+        }
+        _ => Command::new(&exe),
+    };
+    let _ = c.args(["hooks", "uninstall"]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+}
+
 pub fn run(uninstall: bool) -> Result<u8, String> {
     let macos = cfg!(target_os = "macos");
+    if uninstall {
+        remove_git_hooks();
+    }
     if !uninstall && !macos {
         // Linux/Windows: the service runs as root/SYSTEM out of /var/lib/guard,
         // so seed its state now. macOS seeds the user's ~/.guard on first run.

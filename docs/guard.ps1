@@ -98,6 +98,15 @@ Register-ScheduledTask -TaskName 'GuardGitHubWatch' -Action $ghAction -Trigger $
   -Settings $ghSettings -Principal $ghPrincipal -Force -Description 'Guard force-push watchdog (undoes force pushes on main/master)' | Out-Null
 Start-ScheduledTask -TaskName 'GuardGitHubWatch' -ErrorAction SilentlyContinue
 
+# git hooks for this user: pre-push blocks infected pushes, and every clone and
+# pull is scanned. They go in ~/.guard/githooks and the user's global git config.
+if (Get-Command git -ErrorAction SilentlyContinue) {
+  & $Bin hooks install
+  if ($LASTEXITCODE -ne 0) { Write-Warning 'git hooks were not installed' }
+} else {
+  Write-Host 'git is not installed: git hooks skipped (run `guard hooks install` after installing git)'
+}
+
 # --- auto-configure Sysmon (Microsoft-signed kernel telemetry) ---
 # Installs Sysmon (or updates its config if already present) using the config
 # bundled inside the Guard binary. Best-effort: Guard works fine without it.
