@@ -333,6 +333,45 @@ the release workflow refuses to build if it fails.
 
 ---
 
+## Push protection: `guard scan-push`
+
+`guard scan-push [remote]` is the body of a git `pre-push` hook. It reads git's
+pre-push stdin (`<local ref> <local sha> <remote ref> <remote sha>` per line)
+and, for every ref being pushed, scans each file the push adds or changes in
+every new commit, so files deleted again before the push are caught too. If it
+finds malware it **blocks the push** (exit 1). That covers:
+
+- normal pushes and **force pushes** (`--force`, `--force-with-lease`): the range
+  is "reachable from the new tip and not from what the remote had", so rewritten
+  history is scanned too;
+- new branches and tags (compared against your remote-tracking refs);
+- branch deletions, which push no content and always pass;
+- the **whole tree of the pushed tip**, so pushing more work onto a branch that
+  is already infected is blocked until a commit removes the malware.
+
+On a block Guard also cleans the working tree (injected code excised,
+whole-file droppers moved to the quarantine, undo with `guard restore <path>`).
+There is no opt-out: anything that looks like malware is quarantined. The pushed
+content is streamed out of git objects into a temp dir and scanned there, with
+blob sizes checked before anything is read. Nothing is checked out or executed.
+If git can't work out what is being pushed, the push is blocked (fail closed).
+
+**Guard's own repository** must contain its IOCs (signatures, docs, test
+fixtures). A repo counts as Guard's own only when one of its configured remotes
+is `github.com/Syed-Bipul-Rahman/Security-Guard`, or when you list its remote
+URL or path in `~/.guard/trusted-repos` (one per line). Both live outside the
+repository's content, so a cloned repo can never mark itself trusted. Even then
+it is **not skipped**: only hits in a fixed list of known sample files compiled
+into Guard (`testdata/`, `cli/tests/`, `signatures.json/.yaml`, `README.md`,
+`cli/src/scan/remediate.rs`, the `windows/` triage files, and the three
+workflow files) are ignored. Every other file is scanned, blocked and cleaned as usual.
+
+`git push --no-verify` skips every client-side pre-push hook, so a client hook is
+a seat belt, not a wall. For a gate that can't be skipped, use a server-side
+required check.
+
+---
+
 ## Contributing
 
 Contributions are welcome — especially new detection signatures.
