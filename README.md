@@ -372,6 +372,35 @@ required check.
 
 ---
 
+## Clone / pull scanning: `guard scan-checkout`
+
+`guard scan-checkout <post-checkout|post-merge|post-rewrite> [hook args]` is the
+body of git's post-checkout (which also runs at the end of every `git clone`),
+post-merge and post-rewrite hooks. It takes git's hook arguments as they are
+(post-rewrite also reads git's `<old> <new>` pairs on stdin):
+
+- **clone:** scan the whole working tree. **branch switch / pull / amend /
+  rebase:** scan only the files that changed. When nothing changed it returns
+  before loading any rules, so it costs almost nothing.
+- **Every finding is quarantined**, before you open the folder, with no opt-out:
+  injected code is cut out of real files, whole-file droppers (fake fonts) go to
+  the encrypted quarantine vault, and VS Code auto-run settings are removed. It
+  lists every file and what was done to it. Each change is backed up and can be
+  undone with `guard restore <path>`. Review with `git status`.
+- In Guard's own repository only the known sample files are ignored, the same
+  way as for pushes (see above).
+- It always exits 0, so it never fails or blocks git.
+
+| Threat | Covered by |
+|---|---|
+| Malware arriving with a clone/pull | `guard scan-checkout` quarantines it (reversible) |
+| Pushing infected code, including force pushes and new branches | `guard scan-push` blocks it |
+| Malware already on disk before install | the watcher's first-start scan |
+| `git push --no-verify`, or a PC without Guard | **not covered on the client.** Use a server-side required check |
+| Malware that already ran (stolen tokens, persistence) | `guard triage` helps find it. Rotate credentials either way |
+
+---
+
 ## Contributing
 
 Contributions are welcome — especially new detection signatures.

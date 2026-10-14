@@ -7,6 +7,7 @@
 mod depbl;
 mod fingerprint;
 mod magic;
+pub mod checkout;
 pub mod push;
 pub mod trust;
 pub(crate) mod py;
