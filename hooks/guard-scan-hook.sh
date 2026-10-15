@@ -1,52 +1,48 @@
 #!/bin/sh
-# guard-scan-hook.sh — shared Guard hook body, symlinked/copied to the git hook
-# names below. Runs a Guard scan on the repo right after a clone/pull/checkout,
-# BEFORE the developer opens the folder in an editor.
+# Guard's post-checkout, post-merge and post-rewrite hook. `guard hooks
+# install` writes it into ~/.guard/githooks under those three names and points
+# git's global core.hooksPath there, so it runs for every repo. A clone runs
+# post-checkout, so a fresh clone is scanned before anyone opens it.
 #
-# Installed as a global git hook (core.hooksPath) so it fires for EVERY repo,
-# including freshly cloned ones. Detect + report only; it never edits your repo.
+# `guard scan-checkout` scans what arrived and quarantines malware on a hit;
+# on a fresh clone `guard open` warns when the folder would run a task as soon
+# as VS Code opens it. Then it runs the hook this one stands in for: the repo's own
+# .git/hooks/<name>, and the global hooks path set before Guard's.
 #
-# Wired to: post-checkout, post-merge, post-rewrite  (git has no post-clone, but
-# a clone runs a post-checkout, so clones are covered).
-#
-# Exit status is intentionally 0 (never blocks the git operation); the guard
-# raises alerts through the agent + a visible warning, not by failing git.
+# Git ignores the exit status of these hooks; this one passes on the status of
+# the hook it chains to.
 
-set -u
+hook=$(basename "$0")
+guard='@GUARD@'
+[ -x "$guard" ] || guard=$(command -v guard 2>/dev/null) || guard=
 
-# Locate the Guard install (overridable via env)
-GUARD_HOME="${GUARD_HOME:-$HOME/.guard}"
+# post-rewrite gets git's "<old> <new>" pairs on stdin
+input=
+if [ "$hook" = post-rewrite ]; then
+    input=$(cat; echo .)
+    input=${input%.}
+fi
 
-# The guard binary: $GUARD_BIN, else the per-user install, else the one on PATH
-GUARD="${GUARD_BIN:-}"
-if [ -z "$GUARD" ]; then
-    if [ -x "$GUARD_HOME/bin/guard" ]; then
-        GUARD="$GUARD_HOME/bin/guard"
-    else
-        GUARD=$(command -v guard 2>/dev/null) || GUARD=""
+if [ -n "$guard" ]; then
+    root=$(git rev-parse --show-toplevel 2>/dev/null)
+    # a fresh clone (post-checkout from the null commit) gets the VS Code check
+    if [ "$hook" = post-checkout ] && [ -n "${1:-}" ] && [ -z "$(printf %s "$1" | tr -d 0)" ] &&
+        [ -n "$root" ] && ! "$guard" open "$root" >/dev/null 2>&1; then
+        printf '\n\033[31m[GUARD] WARNING: %s runs a task as soon as VS Code opens it.\n' "$root" >&2
+        printf '[GUARD] DO NOT OPEN THIS FOLDER IN VS CODE. Check it with: guard scan "%s"\033[0m\n\n' "$root" >&2
     fi
+    printf '%s' "$input" | "$guard" scan-checkout "$hook" "$@"
+else
+    printf '\033[31m[GUARD] the guard binary is missing; %s was not scanned. Reinstall Guard.\033[0m\n' "$hook" >&2
 fi
 
-# The repo the hook is running in
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-
-# Skip if Guard isn't installed (don't break git for anyone)
-[ -n "$GUARD" ] && [ -x "$GUARD" ] || exit 0
-
-hook_name=$(basename "$0")
-log="$GUARD_HOME/hook.log"
-mkdir -p "$GUARD_HOME" 2>/dev/null || true
-echo "$(date -u +%FT%TZ)  $hook_name  $REPO_ROOT" >> "$log" 2>/dev/null || true
-
-# 1) Highest-priority: is it safe to open in VS Code?
-if ! "$GUARD" open "$REPO_ROOT" >/dev/null 2>>"$log"; then
-    printf '\n\033[31m[GUARD] WARNING: %s contains a VS Code auto-run task (folderOpen dropper).\n' "$REPO_ROOT" >&2
-    printf '[GUARD] DO NOT OPEN THIS FOLDER IN VS CODE. Details: %s\033[0m\n\n' "$log" >&2
-fi
-
-# 2) Full tree scan (records alerts to the agent; prints a short notice on hit)
-if ! "$GUARD" scan "$REPO_ROOT" >/dev/null 2>>"$log"; then
-    printf '\033[31m[GUARD] Supply-chain signatures detected in %s — see %s\033[0m\n' "$REPO_ROOT" "$log" >&2
-fi
-
+# the hooks a global core.hooksPath hides from git
+here=$(cd "$(dirname "$0")" && pwd -P)
+prev=$(git config --global --path --get guard.previousHooksPath 2>/dev/null)
+repo_hooks="$(git rev-parse --git-common-dir 2>/dev/null)/hooks"
+for dir in "$prev" "$repo_hooks"; do
+    [ -n "$dir" ] && [ -x "$dir/$hook" ] || continue
+    [ "$(cd "$dir" && pwd -P)" = "$here" ] && continue
+    printf '%s' "$input" | "$dir/$hook" "$@" || exit $?
+done
 exit 0

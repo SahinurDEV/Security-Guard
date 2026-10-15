@@ -110,6 +110,32 @@ if (-not $gh) { Fail 'guard.ps1 did not register the GuardGitHubWatch task' }
 if ($gh.Principal.UserId -match 'SYSTEM') { Fail 'GuardGitHubWatch runs as SYSTEM, not the user' }
 if ($gh.Actions[0].Arguments -ne 'github watch') { Fail "GuardGitHubWatch runs '$($gh.Actions[0].Arguments)'" }
 
+# the git hooks: core.hooksPath points at the user's ~/.guard/githooks, and a
+# real `git push` of the loader is refused while a clean one goes through
+$hooks = (git config --global --get core.hooksPath)
+if ($hooks -ne "$($env:USERPROFILE -replace '\\','/')/.guard/githooks") { Fail "guard.ps1 set core.hooksPath to '$hooks'" }
+$gate = Join-Path $Work 'push-gate'
+git init -q --bare -b main "$gate\remote.git"
+git init -q -b main "$gate\work"
+git -C "$gate\work" remote add origin "$gate\remote.git"
+[IO.File]::WriteAllText("$gate\work\a.js", "export const a = 1;`n")
+git -C "$gate\work" add -A
+git -C "$gate\work" -c user.name=ci -c user.email=ci@example.com commit -qm clean
+git -C "$gate\work" push -q origin main
+if ($LASTEXITCODE -ne 0) { Fail 'the pre-push hook blocked a clean push' }
+$clean = git -C "$gate\remote.git" rev-parse main
+[IO.File]::WriteAllText("$gate\work\b.js", $payload)
+git -C "$gate\work" add -A
+git -C "$gate\work" -c user.name=ci -c user.email=ci@example.com commit -qm infected
+$ErrorActionPreference = 'Continue'
+$err = (git -C "$gate\work" push origin main 2>&1 | Out-String)
+$pushed = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+Write-Host $err
+if ($pushed -eq 0) { Fail 'an infected push went through' }
+if ((git -C "$gate\remote.git" rev-parse main) -ne $clean) { Fail 'the remote moved on an infected push' }
+Write-Host 'pre-push hook blocked the infected push'
+
 # once the watcher is up, a malicious file dropped in the user's Downloads
 # (the SYSTEM task watches every profile) raises an alert
 $log = "$SysHome\watcher.log"
@@ -150,6 +176,10 @@ Write-Host "::group::guard uninstall"
 if ($LASTEXITCODE -ne 0) { Fail 'guard uninstall failed' }
 if (Task-State) { Fail 'guard uninstall left the GuardWatcher task registered' }
 if (GitHub-Task) { Fail 'guard uninstall left the GuardGitHubWatch task registered' }
+# git exits 1 for a missing key: that is the pass, and must not become this script's exit code
+$left = git config --global --get core.hooksPath
+$global:LASTEXITCODE = 0
+if ($left) { Fail "guard uninstall left core.hooksPath set ($left)" }
 Wait-For 30 'the watcher to stop' { -not (Get-Process -Name guard -ErrorAction SilentlyContinue) }
 Write-Host "::endgroup::"
 Write-Host 'installer OK'

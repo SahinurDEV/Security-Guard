@@ -122,6 +122,7 @@ Uninstall anytime: `sudo guard uninstall` (or `guard uninstall` on Windows).
 | `guard clean <path>` | **remove** injected malware in place (excise/quarantine), backing up first |
 | `guard restore <path>` | undo a clean/quarantine from the backup store |
 | `guard watch` | the always-on filesystem watcher (what the service runs) |
+| `guard hooks install\|uninstall\|status` | global git hooks: block infected pushes, scan and clean every clone and pull (the installers run it) |
 | `guard github check [ROOT...]` | find force pushes on `main` / `master` / the default branch of local repos and put them back (the service does this every 5 minutes) |
 | `guard triage` | host IR triage (reboots / persistence / recon / flood) |
 | `guard sensor` | Windows endpoint sensor: Sysmon + reboot events to alerts (`--selftest` runs anywhere) |
@@ -330,6 +331,28 @@ Python build, so they pin the binary to its behaviour; they are stored base64
 (read one with `base64 -d`). Live malware samples are stored base64-encoded and only decoded in
 memory, so the repository itself always scans clean. CI runs it on every push and
 the release workflow refuses to build if it fails.
+
+---
+
+## Git hooks: `guard hooks install`
+
+Every installer (`docs/guard.sh`, `docs/guard.ps1`, `./install.sh`) runs
+`guard hooks install` as the developer, so the two checks below run in every repo
+on the machine without any setup per repo:
+
+- `pre-push` runs `guard scan-push` and refuses a push that carries malware;
+- `post-checkout`, `post-merge` and `post-rewrite` run `guard scan-checkout`, so a
+  clone or pull is scanned and cleaned before anyone opens it. A fresh clone also
+  gets the VS Code auto-run check.
+
+The hooks live in `~/.guard/githooks`, and git's global `core.hooksPath` points
+there. That global setting hides each repo's own `.git/hooks`, so Guard's hooks
+run those afterwards, and a global hooks path you had before Guard's keeps running
+too (it is put back by `guard hooks uninstall` and `guard uninstall`).
+`guard hooks status` shows whether they are installed. A repo that sets its own
+`core.hooksPath` (husky and the like) overrides the global one, so Guard's hooks
+don't run there; `guard hooks status` inside it says so, and the watcher still
+scans it.
 
 ---
 

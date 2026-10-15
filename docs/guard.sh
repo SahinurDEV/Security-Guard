@@ -62,6 +62,16 @@ echo "installed: $BIN ($("$BIN" version))"
 echo "Setting up the auto-start service ..."
 "$BIN" install
 
+# git hooks for the developer who ran sudo, not root: pre-push blocks infected
+# pushes, and every clone and pull is scanned. They go in that user's
+# ~/.guard/githooks and global git config.
+echo "Setting up the git hooks ..."
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+  sudo -u "$SUDO_USER" -H env -u GUARD_HOME "$BIN" hooks install || echo "warning: git hooks were not installed" >&2
+else
+  "$BIN" hooks install || echo "warning: git hooks were not installed" >&2
+fi
+
 echo ""
 echo "Done. Guard is running and will keep itself updated."
 echo "Try:  guard version   |   guard scan .   |   guard triage"

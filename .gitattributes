@@ -1,2 +1,4 @@
 # goldens are compared byte for byte: keep LF on Windows checkouts too
 cli/tests/golden/** -text
+# embedded into the binary and run by sh, also on Windows
+hooks/*.sh text eol=lf
