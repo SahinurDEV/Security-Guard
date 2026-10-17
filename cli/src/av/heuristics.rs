@@ -109,8 +109,48 @@ pub fn filename_indicators(name: &str, tag: &str) -> Vec<Indicator> {
     out
 }
 
+/// Font and image extensions: a real one is binary data, never source text.
+const ASSET_EXTS: &[&str] = &[
+    ".woff2", ".woff", ".ttf", ".otf", ".eot", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp",
+    ".webp",
+];
+/// Code a disguised dropper reads like (scan/magic.rs's text indicators).
+const CODE_MARKERS: &[&str] = &[
+    "require(",
+    "global[",
+    "process.env",
+    "eval(",
+    "function",
+    "=>",
+    "var _$_",
+    "module.exports",
+    "import ",
+];
+
+/// A "font" or "image" whose content is source code: the fake-font loader.
+fn asset_masquerade(data: &[u8], name: &str, tag: &str) -> Option<Indicator> {
+    if !(ft::is_script(tag) || tag == "text" || tag == "script") {
+        return None;
+    }
+    let base = pystr::name(name.rsplit('!').next().unwrap_or(name));
+    let ext = pystr::suffix(base).to_lowercase();
+    if !ASSET_EXTS.contains(&ext.as_str()) {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&data[..data.len().min(64 * 1024)]);
+    if !CODE_MARKERS.iter().any(|m| head.contains(m)) {
+        return None;
+    }
+    Some(Indicator::new(
+        "name.code-masquerade",
+        70,
+        format!("source code disguised with a {ext} extension"),
+    ))
+}
+
 pub fn analyze(data: &[u8], name: &str, tag: &str) -> Vec<Indicator> {
     let mut out = filename_indicators(name, tag);
+    out.extend(asset_masquerade(data, name, tag));
     let content = match tag {
         "pe" => core_h::pe_indicators(data),
         "elf" => core_h::elf_indicators(data),
@@ -177,5 +217,25 @@ mod tests {
         // other types are judged by name only
         assert!(analyze(b"%PDF", "a.pdf", "pdf").is_empty());
         assert_eq!(Indicator::new("x", 5, "d").to_string(), "x(+5)");
+    }
+
+    /// A "font" or "image" that is really source code (the fake-font loader).
+    #[test]
+    fn code_in_asset() {
+        let all = |data: &[u8], name: &str, tag: &str| -> Vec<String> {
+            analyze(data, name, tag).into_iter().map(|i| i.id).collect()
+        };
+        let js = b"(function(){var a=1;})();";
+        assert_eq!(
+            all(js, "fonts/fa-solid-700.otf", "text"),
+            vec!["name.code-masquerade"]
+        );
+        assert_eq!(
+            all(js, "a.zip!x/logo.PNG", "text"),
+            vec!["name.code-masquerade"]
+        );
+        assert!(all(js, "fonts/app.js", "javascript").is_empty());
+        assert!(all(b"just some words", "x.otf", "text").is_empty());
+        assert!(all(b"OTTO\x00function", "x.otf", "binary").is_empty());
     }
 }

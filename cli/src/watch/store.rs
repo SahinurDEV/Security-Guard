@@ -67,6 +67,17 @@ impl Store {
             .is_none())
     }
 
+    /// Forgets a deleted path and everything under it, so a file put back at
+    /// the same path with the same date is new again.
+    pub fn remove(&self, path: &str) -> Res<usize> {
+        let sep = if cfg!(windows) { '\\' } else { '/' };
+        let under = format!("{}{sep}", path.trim_end_matches(sep));
+        self.c().execute(
+            "DELETE FROM paths WHERE path=? OR substr(path, 1, length(?))=?",
+            [path, &under, &under],
+        )
+    }
+
     pub fn contains(&self, path: &str) -> Res<bool> {
         Ok(self
             .c()
@@ -116,7 +127,9 @@ impl Store {
         for (path, mtime) in batch {
             match existing.get(path) {
                 None => changes.push((path.clone(), "new")),
-                Some(prev) if mtime > prev => changes.push((path.clone(), "changed")),
+                // any change: a file swapped for one with an older date
+                // (a Finder copy keeps the original's) is changed too
+                Some(prev) if mtime != prev => changes.push((path.clone(), "changed")),
                 _ => {}
             }
         }

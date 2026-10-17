@@ -36,7 +36,7 @@ fn internal_targets() -> Vec<PathBuf> {
     vec![h.join("Desktop"), h.join("Documents"), h.join("Downloads")]
 }
 
-fn removable_targets() -> Vec<PathBuf> {
+pub(crate) fn removable_targets() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir("/Volumes") {
         for e in rd.flatten() {

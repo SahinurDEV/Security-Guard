@@ -104,8 +104,9 @@ fn on_event(shared: &Shared, filter: &Filter, cap: usize, res: notify::Result<Ev
             if ev.need_rescan() {
                 q.overflow = true;
             }
-            // Deletions and reads change nothing the snapshot scans for.
-            if matches!(ev.kind, EventKind::Access(_) | EventKind::Remove(_)) {
+            // Reads change nothing. Deletions are passed on so the snapshot
+            // forgets the path: a file put back there later is new again.
+            if matches!(ev.kind, EventKind::Access(_)) {
                 return;
             }
             for p in ev.paths {
