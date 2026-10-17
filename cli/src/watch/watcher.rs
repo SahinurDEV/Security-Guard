@@ -1243,6 +1243,22 @@ impl Watcher {
                 }
             }
         }
+        let names: Vec<String> = blocked
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        if crate::permissions::write_status(&self.home, &names) {
+            self.log(
+                "WARNING: Full Disk Access was lost (an update changes the binary macOS approved)",
+            );
+            if self.may_pop("guard-permissions") {
+                crate::notify::notify(
+                    "Guard - Allow access again",
+                    "After updating, macOS no longer lets Guard read protected folders. \
+                     Run 'guard permissions setup' and turn 'guard' back on.",
+                );
+            }
+        }
         if blocked.is_empty() {
             return;
         }
