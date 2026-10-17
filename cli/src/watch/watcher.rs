@@ -249,8 +249,10 @@ pub struct Watcher {
     repo_dirty: Vec<(String, String)>,
     perm_blocked: HashSet<String>,
     /// external disks being watched; Some only when they were added to the
-    /// roots, so a disk plugged in or out restarts the watcher to follow it
+    /// roots, so the watcher follows disks plugged in or out
     volumes: Option<Vec<PathBuf>>,
+    /// the roots without the external disks
+    base_roots: Vec<PathBuf>,
     /// the macOS access request already ran this session
     perm_requested: bool,
     notify_times: HashMap<String, f64>,
@@ -332,6 +334,7 @@ impl Watcher {
             repo_dirty: vec![],
             perm_blocked: HashSet::new(),
             volumes: None,
+            base_roots: vec![],
             perm_requested: false,
             notify_times: HashMap::new(),
             memguard,
@@ -343,6 +346,11 @@ impl Watcher {
 
     /// Watch these external disks too (see external_volumes).
     pub fn add_volumes(&mut self, vols: Vec<PathBuf>) {
+        if self.volumes.is_none() {
+            self.base_roots = self.roots.clone();
+        } else {
+            self.roots = self.base_roots.clone();
+        }
         for v in &vols {
             let r = resolve(v);
             if !self.roots.contains(&r) {
@@ -1278,14 +1286,16 @@ impl Watcher {
         }
     }
 
-    /// A disk plugged in or removed: exit so the service restarts with it in
-    /// the roots (its files are new to the snapshot, so they get scanned).
-    fn restart_if_disks_changed(&mut self) {
-        let Some(old) = &self.volumes else {
+    /// A disk plugged in or removed: watch the new set of disks right away,
+    /// without a restart (which would leave a gap with nothing watched). A
+    /// new disk's files are new to the snapshot, so the pass scans them; a
+    /// removed disk's rows are dropped so it is scanned again when it returns.
+    fn follow_disk_changes(&mut self) {
+        let Some(old) = self.volumes.clone() else {
             return;
         };
         let now_vols = external_volumes();
-        if &now_vols == old {
+        if now_vols == old {
             return;
         }
         let names: Vec<Value> = now_vols
@@ -1293,12 +1303,22 @@ impl Watcher {
             .map(|v| Value::String(v.to_string_lossy().into_owned()))
             .collect();
         self.log(&format!(
-            "external disks changed, now {}; restarting to watch them",
+            "external disks changed, now {}; watching them",
             pyrepr::repr(&Value::Array(names))
         ));
-        self.store.close();
-        // launchd/systemd restart on any exit; the Windows task only on failure
-        std::process::exit(if cfg!(windows) { 1 } else { 0 });
+        for gone in old.iter().filter(|v| !now_vols.contains(v)) {
+            if let Err(e) = self.store.remove(&resolve(gone).to_string_lossy()) {
+                self.log(&format!("snapshot cleanup error: {e}"));
+            }
+        }
+        self.add_volumes(now_vols);
+        if self.native.is_some() {
+            self.native = None;
+            self.native = self.start_native();
+        }
+        if let Err(e) = self.poll_once(false) {
+            self.log(&format!("poll error: {e}"));
+        }
     }
 
     /// The force-push watchdog, off the watcher's thread (it talks to the
@@ -1398,7 +1418,7 @@ impl Watcher {
             // not at the next full pass.
             if now() - last_disks >= DISK_CHECK_SEC {
                 last_disks = now();
-                self.restart_if_disks_changed();
+                self.follow_disk_changes();
             }
             let pass = if self.native.is_none() {
                 self.poll_once(false).map(|_| ())
@@ -1521,7 +1541,7 @@ pub fn external_volumes() -> Vec<PathBuf> {
         }
         v
     } else {
-        vec![]
+        windows_drives()
     };
     out.retain(|v| {
         v.is_dir()
@@ -1536,6 +1556,42 @@ pub fn external_volumes() -> Vec<PathBuf> {
 
 /// Network shares mount under /Volumes too; a full pass over a big share
 /// would run for hours, so only local disks are watched.
+/// Local drives other than the system drive (USB sticks, memory cards,
+/// second disks). Network, CD/DVD and RAM drives are left out, and so is the
+/// system drive: its user folders are covered by the configured roots.
+#[cfg(windows)]
+fn windows_drives() -> Vec<PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    let system = std::env::var("SystemDrive")
+        .unwrap_or_else(|_| "C:".into())
+        .to_ascii_uppercase();
+    // SAFETY: no arguments; returns a bitmask of drive letters
+    let mask = unsafe { GetLogicalDrives() };
+    let mut out = vec![];
+    for i in 0..26u32 {
+        if mask & (1 << i) == 0 {
+            continue;
+        }
+        let letter = char::from(b'A' + i as u8);
+        if system.starts_with(letter) {
+            continue;
+        }
+        let root = format!("{letter}:\\");
+        let wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: wide is NUL-terminated
+        let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
+        if kind == DRIVE_REMOVABLE || kind == DRIVE_FIXED {
+            out.push(PathBuf::from(root));
+        }
+    }
+    out
+}
+#[cfg(not(windows))]
+fn windows_drives() -> Vec<PathBuf> {
+    vec![]
+}
 #[cfg(target_os = "macos")]
 fn is_local_disk(v: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
