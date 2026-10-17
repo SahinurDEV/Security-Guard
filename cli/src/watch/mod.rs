@@ -277,13 +277,21 @@ pub fn main(argv: &[String]) -> u8 {
     let home = crate::util::guard_home();
     let run = || -> Result<u8, String> {
         let mut cfg = load_config(&home)?;
+        // external disks join the configured roots, not an explicit --roots
+        let mut volumes = cfg
+            .get("watch_external_disks")
+            .is_none_or(|v| pyjson::truthy(Some(v)));
         if let Some(r) = a.roots.filter(|r| !r.is_empty()) {
             cfg.insert("watch_roots".into(), json!(r));
+            volumes = false;
         }
         if let Some(f) = a.interval.filter(|f| *f != 0.0) {
             cfg.insert("poll_interval_sec".into(), json!(f));
         }
         let mut w = watcher::Watcher::new(cfg, home.clone())?;
+        if volumes && !a.once {
+            w.add_volumes(watcher::external_volumes());
+        }
         if a.once {
             // no priming: report what this pass finds (used by tests)
             let n = w.poll_once(false)?;

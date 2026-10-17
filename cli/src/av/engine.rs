@@ -541,6 +541,30 @@ mod tests {
         fs::remove_dir_all(&d).unwrap();
     }
 
+    /// The fake-font loader Bipul downloaded (fa-solid-700.otf): blank
+    /// padding, the campaign marker, a base64 body split into short strings,
+    /// eval. Rebuilt here with a harmless body; the marker is split so this
+    /// source never holds it.
+    #[test]
+    fn fake_font_loader_is_malicious() {
+        let chunk = "Y29uc29sZS5sb2coMSk7Y29uc29sZS5sb2coMSk7Y29uc29s";
+        let body: Vec<String> = (0..60).map(|_| format!("\"{chunk}\"")).collect();
+        let src = format!(
+            "{}{}{}(function(p){{var a=[{}];eval(atob(a.join('')));}})();",
+            " ".repeat(500),
+            "glo",
+            "bal.i = 'A10-*090';",
+            body.join(",")
+        );
+        let d = tmp("font");
+        let f = d.join("fa-solid-700.otf");
+        fs::write(&f, &src).unwrap();
+        let r = engine(MAX_SCAN_BYTES).scan_file(&f);
+        assert_eq!(r.verdict, Verdict::Malicious, "{:?}", r.detections);
+        assert_eq!(action_hint(&r), "quarantine");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
     /// test_archive_limits_configurable: members past the limit are not seen.
     #[test]
     fn archive_limits_apply() {

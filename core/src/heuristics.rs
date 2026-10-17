@@ -226,6 +226,8 @@ static JSOBF_ID: LazyLock<Regex> = LazyLock::new(|| re(r"(?-u)\b_0x[0-9a-f]{4,6}
 // bootstrap tag the _0x loader wave sets before its obfuscated body (issue #24)
 static LOADER_MARKER: LazyLock<Regex> = LazyLock::new(|| re(
     r#"(?-u)\bglobal(?:\['!'\]|\["!"\]|\.i)\s*=\s*['"]A?\d{1,3}(?:-[0-9*]{1,6}){0,3}['"]"#));
+// a base64 payload split into many short string literals (["Z2xv...","9iam..."].join(''))
+static B64_CHUNK: LazyLock<Regex> = LazyLock::new(|| re(r#"(?-u)["'`][A-Za-z0-9+/]{32,}={0,2}["'`]"#));
 static CHARCODE: LazyLock<Regex> = LazyLock::new(|| re(r"(?-u)fromCharCode\s*\(\s*(?:\d+\s*,\s*){29,}\d+"));
 static HEX_ESC: LazyLock<Regex> = LazyLock::new(|| re(r"(?-u)\\x[0-9a-fA-F]{2}"));
 static PS_ENC: LazyLock<Regex> = LazyLock::new(|| re(
@@ -255,17 +257,36 @@ fn has_b64_blob(data: &[u8]) -> bool {
     false
 }
 
+/// At least 2000 base64 characters spread over 10 or more quoted chunks, so
+/// splitting the blob into short strings doesn't hide it from has_b64_blob.
+fn has_b64_chunks(data: &[u8]) -> bool {
+    let (mut n, mut total) = (0usize, 0usize);
+    for m in B64_CHUNK.find_iter(data) {
+        n += 1;
+        total += m.len() - 2;
+        if n >= 10 && total >= 2000 {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn script_indicators(data: &[u8]) -> Vec<Indicator> {
     let mut out = Vec::new();
     let dyn_exec = DYNAMIC_EXEC.is_match(data);
-    if dyn_exec && has_b64_blob(data) {
+    let exec_blob = dyn_exec && (has_b64_blob(data) || has_b64_chunks(data));
+    if exec_blob {
         out.push(ind("script.exec-encoded-blob", 50, "dynamically executes code next to a large encoded blob"));
     }
+    let marker = LOADER_MARKER.is_match(data);
     if JSOBF_ID.find_iter(data).count() >= 50 {
         out.push(ind("script.js-obfuscator", 35, "javascript-obfuscator style _0x identifiers"));
-        if LOADER_MARKER.is_match(data) {
+        if marker {
             out.push(ind("script.js-loader-marker", 40, "obfuscated loader tagged with a known campaign marker"));
         }
+    } else if marker && exec_blob {
+        // the same wave's lighter variant: marker, then an encoded body run by eval
+        out.push(ind("script.js-loader-marker", 40, "executes code next to a known campaign marker"));
     }
     if dyn_exec && CHARCODE.is_match(data) {
         out.push(ind("script.charcode-exec", 40, "builds code from character codes and executes it"));
@@ -319,6 +340,28 @@ mod tests {
         s.extend_from_slice(b"'))");
         assert_eq!(ids(&script_indicators(&s)), ["script.exec-encoded-blob"]);
         assert!(script_indicators(b"print('hi')").is_empty());
+        // the same blob split into short literals and joined
+        let mut s = b"var a=[".to_vec();
+        for _ in 0..60 {
+            s.extend_from_slice(b"\"");
+            s.extend_from_slice(&b"QUJD".repeat(12));
+            s.extend_from_slice(b"\",");
+        }
+        s.extend_from_slice(b"].join('');eval(atob(a));");
+        assert_eq!(ids(&script_indicators(&s)), ["script.exec-encoded-blob"]);
+        // short chunks, or too few of them, stay quiet
+        assert!(script_indicators(b"eval(x);['QUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJD']").is_empty());
+        // the campaign marker, split so this source never holds it
+        let marker = [b"glo".as_slice(), b"bal.i = 'A1-*2';"].concat();
+        let blob = format!("eval(atob('{}'))", "QUJD".repeat(600));
+        let s = [marker.as_slice(), blob.as_bytes()].concat();
+        assert_eq!(
+            ids(&script_indicators(&s)),
+            ["script.exec-encoded-blob", "script.js-loader-marker"]
+        );
+        // a file that only names the marker (a rule, an IR script) stays quiet
+        let s = [marker.as_slice(), b"Invoke-Expression $x"].concat();
+        assert!(script_indicators(&s).is_empty());
     }
 
     #[test]

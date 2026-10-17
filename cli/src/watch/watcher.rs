@@ -248,6 +248,11 @@ pub struct Watcher {
     repo_scan_times: HashMap<String, f64>,
     repo_dirty: Vec<(String, String)>,
     perm_blocked: HashSet<String>,
+    /// external disks being watched; Some only when they were added to the
+    /// roots, so a disk plugged in or out restarts the watcher to follow it
+    volumes: Option<Vec<PathBuf>>,
+    /// the macOS access request already ran this session
+    perm_requested: bool,
     notify_times: HashMap<String, f64>,
     remediate: bool,
     batch_size: usize,
@@ -326,12 +331,25 @@ impl Watcher {
             repo_scan_times: HashMap::new(),
             repo_dirty: vec![],
             perm_blocked: HashSet::new(),
+            volumes: None,
+            perm_requested: false,
             notify_times: HashMap::new(),
             memguard,
             store,
             home,
             cfg,
         })
+    }
+
+    /// Watch these external disks too (see external_volumes).
+    pub fn add_volumes(&mut self, vols: Vec<PathBuf>) {
+        for v in &vols {
+            let r = resolve(v);
+            if !self.roots.contains(&r) {
+                self.roots.push(r);
+            }
+        }
+        self.volumes = Some(vols);
     }
 
     fn cfg_truthy(&self, k: &str, default: bool) -> bool {
@@ -468,10 +486,16 @@ impl Watcher {
     /// os.walk swallows errors: surface permission blocks (macOS TCC,
     /// Windows legacy junctions) so Guard is never silently blind.
     fn walk_error(&mut self, dir: &Path, e: &std::io::Error) {
-        if e.kind() != std::io::ErrorKind::PermissionDenied {
-            return;
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            self.cannot_read(dir);
         }
-        let fname = dir.to_string_lossy().into_owned();
+    }
+
+    /// A folder or a new file Guard may not read (macOS privacy settings,
+    /// Windows legacy junctions): malware there would be neither scanned nor
+    /// removed, so say so in the log and on screen instead of skipping it.
+    fn cannot_read(&mut self, target: &Path) {
+        let fname = target.to_string_lossy().into_owned();
         if !self.perm_blocked.insert(fname.clone()) || self.perm_blocked.len() > 50 {
             return;
         }
@@ -482,6 +506,24 @@ impl Watcher {
             "skipped (access denied)"
         };
         self.log(&format!("WARNING: cannot read {fname} \u{2014} {hint}"));
+        if self.may_pop("guard-permissions") {
+            let fix = if cfg!(target_os = "macos") {
+                "Turn on 'guard' in System Settings > Privacy & Security > Full Disk Access."
+            } else {
+                "Give the Guard service read access to it."
+            };
+            crate::notify::notify(
+                "Guard - Cannot check files",
+                &format!(
+                    "Guard is not allowed to read '{}', so malware there is not removed. {fix}\n{fname}",
+                    display_name(&fname)
+                ),
+            );
+        }
+        if cfg!(target_os = "macos") && !self.perm_requested {
+            self.perm_requested = true;
+            crate::permissions::request(true);
+        }
     }
 
     /// (path, is_dir, mtime) for everything under `root` up to max_depth,
@@ -710,6 +752,13 @@ impl Watcher {
     }
 
     fn scan_file(&mut self, path: &str) {
+        if let Err(e) = fs::File::open(path) {
+            // gone already is fine; blocked is not: it would pass as clean
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                self.cannot_read(Path::new(path));
+            }
+            return;
+        }
         let ext = pystr::suffix(path).to_lowercase();
         let mut findings: Vec<Value> = if !self.scan_exts.contains(&ext) {
             vec![] // antivirus engine only (below)
@@ -1054,8 +1103,16 @@ impl Watcher {
             if !seen.insert(p.clone()) {
                 continue;
             }
-            let Ok(md) = fs::metadata(&p) else {
-                continue; // already gone
+            let md = match fs::metadata(&p) {
+                Ok(md) => md,
+                Err(e) => {
+                    // gone (deleted or moved away): forget it, so the same
+                    // file put back later is scanned as new
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        let _ = self.store.remove(&p.to_string_lossy());
+                    }
+                    continue;
+                }
             };
             let dir = md.is_dir();
             let Some(root) = self.in_scope(&p, dir) else {
@@ -1192,12 +1249,40 @@ impl Watcher {
         self.log(&format!(
             "WARNING: cannot read {} watch root(s): {}",
             blocked.len(),
-            pyrepr::repr(&Value::Array(blocked))
+            pyrepr::repr(&Value::Array(blocked.clone()))
         ));
         if cfg!(target_os = "macos") {
             self.log("requesting access (an Allow prompt should appear)\u{2026}");
-            crate::permissions::request(true);
+            self.perm_requested = true;
+            let res = crate::permissions::request(true);
+            blocked = res["still_blocked"].as_array().cloned().unwrap_or_default();
         }
+        for r in blocked.iter().filter_map(Value::as_str) {
+            self.cannot_read(Path::new(r));
+        }
+    }
+
+    /// A disk plugged in or removed: exit so the service restarts with it in
+    /// the roots (its files are new to the snapshot, so they get scanned).
+    fn restart_if_disks_changed(&mut self) {
+        let Some(old) = &self.volumes else {
+            return;
+        };
+        let now_vols = external_volumes();
+        if &now_vols == old {
+            return;
+        }
+        let names: Vec<Value> = now_vols
+            .iter()
+            .map(|v| Value::String(v.to_string_lossy().into_owned()))
+            .collect();
+        self.log(&format!(
+            "external disks changed, now {}; restarting to watch them",
+            pyrepr::repr(&Value::Array(names))
+        ));
+        self.store.close();
+        // launchd/systemd restart on any exit; the Windows task only on failure
+        std::process::exit(if cfg!(windows) { 1 } else { 0 });
     }
 
     /// The force-push watchdog, off the watcher's thread (it talks to the
@@ -1280,7 +1365,10 @@ impl Watcher {
         let github_every = if cfg!(windows) {
             0.0
         } else {
-            num("github_check_sec", crate::github::DEFAULT_INTERVAL_SEC as f64)
+            num(
+                "github_check_sec",
+                crate::github::DEFAULT_INTERVAL_SEC as f64,
+            )
         };
         let mut last_update = 0.0;
         let mut last_github = 0.0;
@@ -1290,6 +1378,7 @@ impl Watcher {
                 self.spawn_github_check();
             }
             let pass = if self.native.is_none() {
+                self.restart_if_disks_changed();
                 self.poll_once(false).map(|_| ())
             } else {
                 let (paths, overflow) = self.wait_native();
@@ -1298,6 +1387,7 @@ impl Watcher {
                         self.log("native events dropped; running a full snapshot pass");
                     }
                     last_full = now();
+                    self.restart_if_disks_changed();
                     self.poll_once(false).map(|_| ())
                 } else {
                     self.handle_native(paths).map(|_| ())
@@ -1388,6 +1478,58 @@ fn run_hook(cmd: &[Value], path: &str) -> Result<(), String> {
 
 /// Resolves the configured roots. On Windows the service runs as SYSTEM, so a
 /// "~/..." root means that folder under every real user profile.
+/// Mounted external disks (USB drives, SD cards, network shares, opened disk
+/// images): /Volumes/* on macOS, /media/<user>/* and /run/media/<user>/* on
+/// Linux (any user's). Time Machine backup disks are left out.
+pub fn external_volumes() -> Vec<PathBuf> {
+    let mut out = if cfg!(target_os = "macos") {
+        crate::permissions::removable_targets()
+    } else if cfg!(target_os = "linux") {
+        // every user's: the service runs as root
+        let mut v = vec![];
+        for base in ["/media", "/run/media"] {
+            for user in fs::read_dir(base).into_iter().flatten().flatten() {
+                if let Ok(rd) = fs::read_dir(user.path()) {
+                    v.extend(rd.flatten().map(|e| e.path()));
+                }
+            }
+        }
+        v
+    } else {
+        vec![]
+    };
+    out.retain(|v| {
+        v.is_dir()
+            && !v.join("Backups.backupdb").exists()
+            && !v.join(".timemachine").exists()
+            && !pystr::name(&v.to_string_lossy()).starts_with(".timemachine")
+            && is_local_disk(v)
+    });
+    out.sort();
+    out
+}
+
+/// Network shares mount under /Volumes too; a full pass over a big share
+/// would run for hours, so only local disks are watched.
+#[cfg(target_os = "macos")]
+fn is_local_disk(v: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(v.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: c is NUL-terminated and st is a valid out-parameter
+    if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
+        return false;
+    }
+    st.f_flags & libc::MNT_LOCAL as u32 != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_local_disk(_: &Path) -> bool {
+    true
+}
+
 pub(crate) fn expand_roots(raw: &[String]) -> Vec<PathBuf> {
     let mut out = vec![];
     for r in raw {
