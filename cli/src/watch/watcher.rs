@@ -1388,13 +1388,19 @@ impl Watcher {
         };
         let mut last_update = 0.0;
         let mut last_github = 0.0;
+        let mut last_disks = now();
         while RUNNING.load(Ordering::SeqCst) {
             if github_every > 0.0 && now() - last_github >= github_every {
                 last_github = now();
                 self.spawn_github_check();
             }
-            let pass = if self.native.is_none() {
+            // A disk or memory card plugged in gets watched within seconds,
+            // not at the next full pass.
+            if now() - last_disks >= DISK_CHECK_SEC {
+                last_disks = now();
                 self.restart_if_disks_changed();
+            }
+            let pass = if self.native.is_none() {
                 self.poll_once(false).map(|_| ())
             } else {
                 let (paths, overflow) = self.wait_native();
@@ -1403,7 +1409,6 @@ impl Watcher {
                         self.log("native events dropped; running a full snapshot pass");
                     }
                     last_full = now();
-                    self.restart_if_disks_changed();
                     self.poll_once(false).map(|_| ())
                 } else {
                     self.handle_native(paths).map(|_| ())
@@ -1491,6 +1496,10 @@ fn run_hook(cmd: &[Value], path: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// How often the watcher looks for newly mounted disks (a directory listing
+/// and one statfs per disk).
+const DISK_CHECK_SEC: f64 = 3.0;
 
 /// Resolves the configured roots. On Windows the service runs as SYSTEM, so a
 /// "~/..." root means that folder under every real user profile.
