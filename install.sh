@@ -113,5 +113,13 @@ case "$OS" in
         ;;
 esac
 
+# 5. macOS file access: only the user can switch on Full Disk Access for the
+# service (Downloads, Desktop, Documents, external disks). Skipped without a
+# terminal (CI) or with GUARD_SKIP_PERMISSIONS=1.
+if [ "$OS" = Darwin ] && [ -t 1 ] && [ -z "${GUARD_SKIP_PERMISSIONS:-}" ]; then
+    echo "==> Setting up file access"
+    GUARD_HOME="$GUARD_HOME" "$GUARD" permissions setup || true
+fi
+
 echo "==> Done. Logs: $GUARD_HOME/watcher.log  Alerts: $GUARD_HOME/alerts.jsonl"
 echo "    Verify: tail -f $GUARD_HOME/watcher.log"

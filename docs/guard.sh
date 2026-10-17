@@ -72,6 +72,18 @@ else
   "$BIN" hooks install || echo "warning: git hooks were not installed" >&2
 fi
 
+# macOS only lets the user give the service access to Downloads, Desktop,
+# Documents and external disks: open the setting and wait for the switch.
+# Skipped without a terminal (CI) or with GUARD_SKIP_PERMISSIONS=1.
+if [ "$os" = darwin ] && [ -t 1 ] && [ -z "${GUARD_SKIP_PERMISSIONS:-}" ]; then
+  echo "Setting up file access ..."
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    sudo -u "$SUDO_USER" -H env -u GUARD_HOME "$BIN" permissions setup || true
+  else
+    "$BIN" permissions setup || true
+  fi
+fi
+
 echo ""
 echo "Done. Guard is running and will keep itself updated."
 echo "Try:  guard version   |   guard scan .   |   guard triage"
