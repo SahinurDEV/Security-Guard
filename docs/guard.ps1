@@ -84,8 +84,8 @@ if ($blocked) {
   Write-Host "build is not signed yet. Nothing was installed."
   Write-Host ""
   Write-Host "To install Guard anyway, turn Smart App Control off in the page that"
-  Write-Host "opens now, then run this installer again. Windows can only turn Smart"
-  Write-Host "App Control back on by resetting the PC."
+  Write-Host "opens now, then run this installer again. Windows builds before the"
+  Write-Host "April 2026 update can only turn it back on by resetting the PC."
   Write-Host "More: https://support.microsoft.com/windows/security/threat-malware-protection/smart-app-control-has-blocked-part-of-this-app"
   # the choice stays with the person at the keyboard: just show the setting
   Start-Process 'windowsdefender://smartapp' -ErrorAction SilentlyContinue
