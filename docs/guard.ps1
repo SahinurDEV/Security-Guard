@@ -62,6 +62,35 @@ Get-Process -Name guard -ErrorAction SilentlyContinue | Stop-Process -Force -Err
 Start-Sleep -Seconds 1
 if (Test-Path $Bin) { Remove-Item $Bin -Force -ErrorAction SilentlyContinue }
 Move-Item -Force $tmp $Bin
+
+# Smart App Control / App Control for Business block unsigned programs from
+# running at all. Check before registering anything, so a blocked install stops
+# with a clear message instead of failing halfway.
+$blocked = $null
+try {
+  & $Bin version | Out-Null
+} catch {
+  $blocked = $_.Exception.Message
+}
+if ($blocked) {
+  Remove-Item $Bin -Force -ErrorAction SilentlyContinue
+  Remove-MpPreference -ExclusionPath $InstallDir -ErrorAction SilentlyContinue
+  Remove-MpPreference -ExclusionProcess 'guard.exe' -ErrorAction SilentlyContinue
+  Remove-Item $InstallDir -Force -ErrorAction SilentlyContinue
+  Write-Host ""
+  Write-Host "Windows blocked guard.exe from running: $blocked"
+  Write-Host "This is Smart App Control (or a company App Control policy). It blocks"
+  Write-Host "programs without a trusted code-signing certificate, and this Guard"
+  Write-Host "build is not signed yet. Nothing was installed."
+  Write-Host ""
+  Write-Host "To install Guard anyway, turn Smart App Control off in the page that"
+  Write-Host "opens now, then run this installer again. Windows builds before the"
+  Write-Host "April 2026 update can only turn it back on by resetting the PC."
+  Write-Host "More: https://support.microsoft.com/windows/security/threat-malware-protection/smart-app-control-has-blocked-part-of-this-app"
+  # the choice stays with the person at the keyboard: just show the setting
+  Start-Process 'windowsdefender://smartapp' -ErrorAction SilentlyContinue
+  return
+}
 Write-Host "installed: $Bin"
 
 # add install dir to system PATH (idempotent)
