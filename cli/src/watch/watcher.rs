@@ -462,11 +462,24 @@ impl Watcher {
         true
     }
 
+    /// The desktop alert, without holding up the scan. On Windows a toast that
+    /// opens watcher.log when clicked; `"notify_style": "modal"` brings back the
+    /// alert box that waits for OK.
+    fn pop(&self, title: &str, message: &str) {
+        let style = self.cfg.get("notify_style").and_then(Value::as_str);
+        crate::notify::alert_in_background(
+            title.to_string(),
+            message.to_string(),
+            Some(self.log_path.clone()),
+            crate::notify::modal_style(style),
+        );
+    }
+
     fn notify_neutralized(&mut self, target: &str, n: usize) {
         if !self.may_pop(target) {
             return;
         }
-        crate::notify::notify(
+        self.pop(
             "Guard - Threat neutralized",
             &format!(
                 "Removed injected malware from '{}'. {n} file(s) cleaned/quarantined; \
@@ -480,7 +493,7 @@ impl Watcher {
         if !self.may_pop(path) {
             return;
         }
-        crate::notify::notify(
+        self.pop(
             "Guard - Threat detected",
             &format!(
                 "Malicious code found in '{}'. {n} critical finding(s). \
@@ -520,7 +533,7 @@ impl Watcher {
             } else {
                 "Give the Guard service read access to it."
             };
-            crate::notify::notify(
+            self.pop(
                 "Guard - Cannot check files",
                 &format!(
                     "Guard is not allowed to read '{}', so malware there is not removed. {fix}\n{fname}",
@@ -1260,7 +1273,7 @@ impl Watcher {
                 "WARNING: Full Disk Access was lost (an update changes the binary macOS approved)",
             );
             if self.may_pop("guard-permissions") {
-                crate::notify::notify(
+                self.pop(
                     "Guard - Allow access again",
                     "After updating, macOS no longer lets Guard read protected folders. \
                      Run 'guard permissions setup' and turn 'guard' back on.",

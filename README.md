@@ -86,8 +86,12 @@ Uninstall anytime: `sudo guard uninstall` (or `guard uninstall` on Windows).
   - **strips** `task.allowAutomaticTasks` and `folderOpen` dropper tasks from
     `.vscode`.
   Every change is backed up first and is reversible (`guard restore`).
-- **Desktop notifications** — a "Threat neutralized" popup on detection (Windows
-  alert into the active session, macOS Notification Center, Linux `notify-send`).
+- **Desktop notifications** — a "Threat neutralized" notification on detection
+  (Windows toast in the logged-in user's Action Center that opens `watcher.log`
+  when clicked, macOS Notification Center, Linux `notify-send`). Nothing waits for
+  a click. Where Windows toasts are unavailable or turned off, Guard falls back to
+  the alert box; set `"notify_style": "modal"` in `watcher.config.json` (or
+  `GUARD_NOTIFY_STYLE=modal`) to always get the alert box.
 - **OTA auto-update** — the agent checks a signed manifest and updates itself
   (Ed25519-verified, fail-closed, downgrade-protected). No manual step.
 - **Malicious-dependency check** — versions matched against a GitHub-advisory
@@ -272,7 +276,7 @@ The watcher, `guard scan` and `guard clean` all use this engine automatically.
 `GUARD_HOME` (defaults: `/var/lib/guard` for the Linux/Windows service,
 `~/.guard` for the macOS user agent) holds:
 
-- `watcher.config.json` — watch roots, `remediate`, `notify`, poll interval, memory budget
+- `watcher.config.json` — watch roots, `remediate`, `notify`, `notify_style`, poll interval, memory budget
 - `alerts.jsonl` — every detection (audit)
 - `watcher.log` — activity
 - `quarantine/` — backups of everything remediated + `index.jsonl` (for `guard restore`)
